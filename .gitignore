@@ -30,6 +30,9 @@ venv/
 # uv
 uv.lock
 
+# Persisted user audio (served by backend)
+backend/data/
+
 # --- OS / IDE ---
 .DS_Store
 Thumbs.db

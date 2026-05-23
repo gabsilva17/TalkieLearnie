@@ -8,6 +8,12 @@ dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
     "python-dotenv>=1.0.1",
+    "anthropic>=0.104.1",
+    "httpx>=0.28.1",
+    "python-multipart>=0.0.29",
+    "supabase>=2.30.0",
+    "pydantic>=2.13.4",
+    "openai>=2.38.0",
 ]
 
 [dependency-groups]

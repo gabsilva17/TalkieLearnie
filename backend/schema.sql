@@ -1,0 +1,66 @@
+-- TalkieLearnie — Supabase schema for use case 1.
+-- Paste this into the Supabase SQL editor and run.
+
+create table plans (
+  id uuid primary key default gen_random_uuid(),
+  device_id text not null,
+  prep_for text not null,
+  target_date date not null,
+  audience_info text not null,
+  created_at timestamptz not null default now()
+);
+create index plans_device_idx on plans(device_id, created_at desc);
+
+create table plan_days (
+  id uuid primary key default gen_random_uuid(),
+  plan_id uuid not null references plans(id) on delete cascade,
+  day_index int not null,
+  day_date date not null,
+  theme text not null,
+  question text not null,
+  completed_at timestamptz,
+  unique (plan_id, day_index)
+);
+create index plan_days_plan_idx on plan_days(plan_id, day_index);
+
+create table sessions (
+  id uuid primary key default gen_random_uuid(),
+  plan_day_id uuid not null references plan_days(id) on delete cascade,
+  audio_duration_s numeric(7,2) not null,
+  audio_filename text,
+  transcript text not null,
+  wpm numeric(6,2) not null,
+  filler_count int not null,
+  top_filler text,
+  filler_timestamps jsonb not null default '[]'::jsonb,
+  pacing_variation numeric(5,3) not null,
+  rating int not null check (rating between 1 and 10),
+  feedback_json jsonb not null,
+  created_at timestamptz not null default now()
+);
+create index sessions_day_idx on sessions(plan_day_id, created_at desc);
+
+-- Queued local notifications. The admin "Send" button inserts a row; the
+-- mobile app polls /push/pending while foregrounded, presents each row as a
+-- local notification, then acks (delete). No Expo Push API involved — this
+-- pattern works under Expo Go (which dropped remote push in SDK 53+).
+create table pending_pushes (
+  id uuid primary key default gen_random_uuid(),
+  device_id text not null,
+  title text not null,
+  body text not null,
+  created_at timestamptz not null default now()
+);
+create index pending_pushes_device_idx on pending_pushes(device_id, created_at);
+
+-- Migration for existing installs (safe to re-run):
+-- alter table sessions add column if not exists audio_filename text;
+-- alter table sessions add column if not exists filler_timestamps jsonb not null default '[]'::jsonb;
+-- drop table if exists push_tokens;
+-- create table if not exists pending_pushes (
+--   id uuid primary key default gen_random_uuid(),
+--   device_id text not null,
+--   title text not null,
+--   body text not null,
+--   created_at timestamptz not null default now()
+-- );

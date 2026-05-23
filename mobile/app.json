@@ -22,6 +22,11 @@
       "predictiveBackGestureEnabled": false,
       "package": "com.dotponto.coachmobile"
     },
+    "androidStatusBar": {
+      "backgroundColor": "#FFFFFF",
+      "barStyle": "dark-content",
+      "translucent": false
+    },
     "web": {
       "output": "static",
       "favicon": "./assets/images/favicon.png"
@@ -39,10 +44,24 @@
             "backgroundColor": "#000000"
           }
         }
-      ]
+      ],
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Permitir que a TalkieLearnie use o microfone para gravar a tua resposta."
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "color": "#7c9cff",
+          "defaultChannel": "default"
+        }
+      ],
+      "@react-native-community/datetimepicker"
     ],
     "experiments": {
-      "typedRoutes": true,
+      "typedRoutes": false,
       "reactCompiler": true
     },
     "extra": {

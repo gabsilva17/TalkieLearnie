@@ -1,74 +1,85 @@
-import { useState } from "react";
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { useRouter } from "expo-router";
+import { useEffect } from "react";
+import { StyleSheet } from "react-native";
+import Animated, { FadeIn } from "react-native-reanimated";
 
-const API_URL = process.env.EXPO_PUBLIC_API_URL ?? "http://localhost:8000";
+import { LogoMark } from "@/components/ui/LogoMark";
+import { Screen } from "@/components/ui/Screen";
+import { Plan, api, cacheKeys, getCached, setCached } from "@/lib/api";
+import { getDeviceId } from "@/lib/deviceId";
+import { clearLastPlanId, getLastPlanId } from "@/lib/lastPlan";
 
 export default function Index() {
-  const [status, setStatus] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const router = useRouter();
 
-  const pingBackend = async () => {
-    setLoading(true);
-    setStatus(null);
-    try {
-      const res = await fetch(`${API_URL}/health`);
-      const data = (await res.json()) as { status: string };
-      setStatus(data.status);
-    } catch (err) {
-      setStatus(`error: ${(err as Error).message}`);
-    } finally {
-      setLoading(false);
-    }
-  };
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const id = await getDeviceId();
+        const lastId = await getLastPlanId();
+
+        // Fast path: cache hydrated from disk lets us route immediately, before
+        // any network round-trip. The fetched data still flows through the
+        // detail screen's SWR loop.
+        if (lastId) {
+          const cachedPlan = getCached<Plan>(cacheKeys.plan(lastId));
+          if (cachedPlan) {
+            router.replace(`/plan/${lastId}`);
+            return;
+          }
+        }
+        const cachedList = getCached<Plan[]>(cacheKeys.plans(id));
+        if (cachedList) {
+          router.replace(cachedList.length > 0 ? "/plans" : "/onboarding");
+          return;
+        }
+
+        // Cold start: fall back to network.
+        if (lastId) {
+          const plan = await api.getPlan(lastId, id);
+          if (cancelled) return;
+          if (plan) {
+            setCached(cacheKeys.plan(plan.id), plan, { persist: true });
+            router.replace(`/plan/${plan.id}`);
+            return;
+          }
+          await clearLastPlanId();
+        }
+        const plans = await api.getPlans(id);
+        if (cancelled) return;
+        setCached(cacheKeys.plans(id), plans, { persist: true });
+        for (const p of plans) {
+          setCached(cacheKeys.plan(p.id), p, { persist: true });
+        }
+        router.replace(plans.length > 0 ? "/plans" : "/onboarding");
+      } catch (err) {
+        if (cancelled) return;
+        console.warn("boot routing failed", err);
+        router.replace("/onboarding");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
 
   return (
-    <SafeAreaView style={styles.safe}>
-      <View style={styles.container}>
-        <Text style={styles.title}>AI Communication Coach</Text>
-        <Pressable
-          onPress={pingBackend}
-          disabled={loading}
-          style={({ pressed }) => [styles.button, pressed && styles.buttonPressed]}
-        >
-          {loading ? (
-            <ActivityIndicator color="#fff" />
-          ) : (
-            <Text style={styles.buttonText}>Ping backend</Text>
-          )}
-        </Pressable>
-        {status && <Text style={styles.status}>{status}</Text>}
-        <Text style={styles.hint}>API: {API_URL}</Text>
-      </View>
-    </SafeAreaView>
+    <Screen>
+      <Animated.View
+        entering={FadeIn.duration(240)}
+        style={styles.container}
+      >
+        <LogoMark size="lg" />
+      </Animated.View>
+    </Screen>
   );
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: "#0b0d12" },
   container: {
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
-    padding: 24,
-    gap: 24,
   },
-  title: {
-    fontSize: 28,
-    fontWeight: "700",
-    color: "#fff",
-    textAlign: "center",
-  },
-  button: {
-    backgroundColor: "#4f46e5",
-    paddingHorizontal: 28,
-    paddingVertical: 14,
-    borderRadius: 999,
-    minWidth: 180,
-    alignItems: "center",
-  },
-  buttonPressed: { opacity: 0.8 },
-  buttonText: { color: "#fff", fontWeight: "600", fontSize: 16 },
-  status: { color: "#22c55e", fontSize: 18, fontWeight: "600" },
-  hint: { color: "#6b7280", fontSize: 12 },
 });

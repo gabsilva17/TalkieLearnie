@@ -1,10 +1,11 @@
+import * as Haptics from "expo-haptics";
 import {
   CaretRightIcon as CaretRight,
   CheckIcon as Check,
   LockIcon as Lock,
 } from "phosphor-react-native";
 import { useEffect } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { StyleSheet, Text, View } from "react-native";
 import Animated, {
   Easing,
   useAnimatedStyle,
@@ -14,6 +15,7 @@ import Animated, {
   withTiming,
 } from "react-native-reanimated";
 
+import { PressableScale } from "@/components/ui/PressableScale";
 import { colors, fonts, palette, radii, spacing, type as t } from "@/lib/theme";
 
 export type DayCardStatus = "done" | "current" | "locked";
@@ -67,9 +69,16 @@ export function DayCard({
 
   return (
     <Animated.View style={bounceStyle}>
-      <Pressable
+      <PressableScale
         disabled={!interactive}
-        onPress={interactive ? onPress : undefined}
+        onPress={
+          interactive
+            ? () => {
+                Haptics.selectionAsync().catch(() => {});
+                onPress?.();
+              }
+            : undefined
+        }
         style={({ pressed }) => [
           styles.card,
           isCurrent ? styles.cardCurrent : null,
@@ -132,7 +141,7 @@ export function DayCard({
             style={styles.trailingIcon}
           />
         )}
-      </Pressable>
+      </PressableScale>
     </Animated.View>
   );
 }

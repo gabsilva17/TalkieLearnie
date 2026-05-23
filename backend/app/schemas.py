@@ -108,3 +108,16 @@ class AskReq(BaseModel):
 
 class AskResp(BaseModel):
     reply: str
+
+
+class AskTranscribeResp(BaseModel):
+    text: str
+
+
+class MotivationReq(BaseModel):
+    device_id: str = Field(min_length=1)
+    plan_id: UUID
+
+
+class MotivationResp(BaseModel):
+    message: str

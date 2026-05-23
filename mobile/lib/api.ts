@@ -1,11 +1,28 @@
 import * as FileSystem from "expo-file-system/legacy";
 
 import {
+  enqueueAchievements,
+  setAchievementsResultScreenActive,
+} from "@/lib/achievementsQueue";
+import {
   deleteCached,
+  getCached,
   invalidatePrefix,
+  pruneCacheByPrefix,
   setCached,
   updateCached,
 } from "@/lib/cache";
+import { localTodayISO } from "@/lib/dayDate";
+import {
+  readEarnedAchievementIds,
+  writeEarnedAchievementIds,
+} from "@/lib/earnedAchievements";
+import { setPendingPlanCompleted } from "@/lib/planCompletionQueue";
+import {
+  readLastStreakCelebrationDate,
+  setPendingStreakUnlock,
+  setStreakResultScreenActive,
+} from "@/lib/streakCelebration";
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -298,6 +315,65 @@ export const api = {
     }
   },
 
+  async getMotivation(input: {
+    device_id: string;
+    plan_id: string;
+  }): Promise<string> {
+    // Fallback used when the network call fails or times out. Keep this in
+    // pt-PT and aligned with the system prompt's tone so the celebration
+    // sequence still reads naturally if Haiku is unreachable.
+    const FALLBACK = "Estás um passo mais perto. Mais um treino feito.";
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 8000);
+    try {
+      const res = await fetch(`${API_URL}/motivation`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          device_id: input.device_id,
+          plan_id: input.plan_id,
+        }),
+        signal: ctrl.signal,
+      });
+      if (!res.ok) return FALLBACK;
+      const body = (await res.json()) as { message?: string };
+      const msg = (body.message ?? "").trim();
+      return msg || FALLBACK;
+    } catch {
+      return FALLBACK;
+    } finally {
+      clearTimeout(t);
+    }
+  },
+
+  async transcribeAsk(input: {
+    device_id: string;
+    audio_uri: string;
+  }): Promise<{ text: string }> {
+    const result = await FileSystem.uploadAsync(
+      `${API_URL}/ask/transcribe`,
+      input.audio_uri,
+      {
+        httpMethod: "POST",
+        uploadType: FileSystem.FileSystemUploadType.MULTIPART,
+        fieldName: "audio",
+        mimeType: "audio/m4a",
+        parameters: { device_id: input.device_id },
+      },
+    );
+    if (result.status >= 400) {
+      let detail = `HTTP ${result.status}`;
+      try {
+        const body = JSON.parse(result.body);
+        if (body?.detail) detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
+      } catch {
+        if (result.body) detail = result.body.slice(0, 300);
+      }
+      throw new Error(detail);
+    }
+    return JSON.parse(result.body) as { text: string };
+  },
+
   async submitSession(input: {
     device_id: string;
     plan_day_id: string;
@@ -324,13 +400,155 @@ export const api = {
       throw new Error(detail);
     }
     const session = JSON.parse(result.body) as SessionResult;
-    // The session changes plan completion + profile derived stats. Invalidate
-    // both so the next focus re-fetches; cache the session itself so the
-    // result screen can revisit without a spinner.
+    // SWR pattern: write through, don't wipe. Wiping the plan/plans/profile
+    // caches makes every screen that subscribes to them flip to its loading
+    // spinner the instant the user navigates away — and on slow networks the
+    // refetch can stall for 5-8s, which feels like the app is stuck. Instead,
+    // patch the cached plan + plans list with the just-completed day so the
+    // UI is correct immediately. Profile stays untouched; its useFocusEffect
+    // refetches fresh stats silently while the user keeps seeing the old
+    // numbers, which is exactly the SWR behavior we want.
     setCached(cacheKeys.session(input.plan_day_id), session);
-    invalidatePrefix(`plan:`); // clear all plan:{id} entries
-    deleteCached(cacheKeys.plans(input.device_id));
-    deleteCached(cacheKeys.profile(input.device_id));
+
+    const dayId = input.plan_day_id;
+    const completedAt = session.created_at;
+    const markDayDone = (days: PlanDay[]) =>
+      days.map((d) => (d.id === dayId ? { ...d, completed_at: completedAt } : d));
+
+    const cachedPlans = getCached<Plan[]>(cacheKeys.plans(input.device_id));
+    if (cachedPlans) {
+      const nextPlans = cachedPlans.map((p) =>
+        p.days.some((d) => d.id === dayId)
+          ? { ...p, days: markDayDone(p.days) }
+          : p,
+      );
+      setCached(cacheKeys.plans(input.device_id), nextPlans, { persist: true });
+    }
+
+    const planWithDay = cachedPlans?.find((p) =>
+      p.days.some((d) => d.id === dayId),
+    );
+    if (planWithDay) {
+      const cachedPlan = getCached<Plan>(cacheKeys.plan(planWithDay.id));
+      if (cachedPlan) {
+        setCached(
+          cacheKeys.plan(planWithDay.id),
+          { ...cachedPlan, days: markDayDone(cachedPlan.days) },
+          { persist: true },
+        );
+      }
+    }
+
+    // Plan-completion check: was this the final missing day? We diff *against
+    // the pre-write snapshot* so the celebration only fires on the transition
+    // (not on subsequent re-submits of an already-completed plan). The cache
+    // is the source of truth here — schema has no plan-level `completed_at`
+    // and we don't need one for the demo.
+    if (planWithDay) {
+      const before = planWithDay.days;
+      const wasIncomplete = before.some(
+        (d) => !d.completed_at && d.id !== dayId,
+      );
+      const justClosedLastDay =
+        !wasIncomplete && before.some((d) => d.id === dayId && !d.completed_at);
+      if (justClosedLastDay) {
+        // Park the event — the result screen flushes it into the live queue
+        // on "VOLTAR AO PLANO" so the overlay doesn't fight the choreography
+        // or the rating reveal for screen time.
+        setPendingPlanCompleted({
+          plan_id: planWithDay.id,
+          prep_for: planWithDay.prep_for,
+          total_days: planWithDay.days.length,
+        });
+      }
+    }
+
+    // Close the achievement + streak gates synchronously, BEFORE the
+    // fire-and-forget IIFE starts. The IIFE awaits the network and may resolve
+    // at any moment between now and long after result.tsx has unmounted — by
+    // arming up front we guarantee the enqueue/parking happens with the gate
+    // already closed, so the cards never paint over the upload-side
+    // CelebrationFlow. result.tsx's unmount cleanup opens the gate and
+    // promotes pending in one shot. Plan completion doesn't need this — it's
+    // parked synchronously above, before the user has navigated anywhere.
+    setAchievementsResultScreenActive(true);
+    setStreakResultScreenActive(true);
+
+    // Fire-and-forget refresh of the profile cache. The user is about to see
+    // the result screen and may tap "Perfil" next; pre-warming the cache here
+    // means the tab opens to fresh streak/totals/achievements instead of a
+    // spinner. Failures are silent — Perfil's own useFocusEffect will retry.
+    //
+    // Achievement-unlock detection: read the persisted baseline of earned IDs
+    // *before* the refresh, then diff against the fresh response and enqueue
+    // anything that flipped from unearned to earned. Baseline lives in
+    // AsyncStorage (`mobile/lib/earnedAchievements.ts`) rather than the
+    // volatile profile cache so the diff still works on cold start, when
+    // pre-warm is still in flight, or after a cache wipe. After the diff we
+    // rewrite the baseline so the next session compares against the latest
+    // truth.
+    (async () => {
+      const prevEarnedIds = await readEarnedAchievementIds();
+      const prevStreakDate = await readLastStreakCelebrationDate();
+      try {
+        const p = await api.getProfile(input.device_id);
+        setCached(cacheKeys.profile(input.device_id), p, { persist: true });
+
+        // Baseline-drift detection. The persisted earned-IDs set only ever
+        // *grows*; if the server-side data was wiped externally (admin
+        // "delete db data" during demos), the baseline would shadow every
+        // re-earnable achievement and the popup would silently never fire
+        // again. Signal: any ID in prevEarnedIds that the server no longer
+        // considers earned. When drift is detected, treat the baseline as
+        // empty for this diff so re-earned achievements resurface, and
+        // clear the streak gate so today can re-celebrate too.
+        const currentEarnedIds = new Set(
+          p.achievements.filter((a) => a.earned).map((a) => a.id),
+        );
+        const baselineDrifted = Array.from(prevEarnedIds).some(
+          (id) => !currentEarnedIds.has(id),
+        );
+        const effectivePrevIds = baselineDrifted ? new Set<string>() : prevEarnedIds;
+        const effectivePrevStreakDate = baselineDrifted ? null : prevStreakDate;
+
+        const newly = p.achievements.filter(
+          (a) => a.earned && !effectivePrevIds.has(a.id),
+        );
+        await writeEarnedAchievementIds(p.achievements);
+        enqueueAchievements(newly);
+
+        // Streak-activation detection: if today's streak is now active and we
+        // haven't celebrated this local date yet, park the event. The result
+        // screen's unmount cleanup flushes it into the live queue so the
+        // overlay paints over /plans (same choreography as plan completion).
+        // Gate on the persisted date, not on `streak_active_today` alone:
+        // every subsequent same-day session would otherwise re-trigger.
+        //
+        // IMPORTANT: the gate write moved out of here. We now write it from
+        // the StreakUnlockedOverlay's CONTINUAR handler, i.e. only after the
+        // user has actually seen and dismissed the celebration. Writing here
+        // had a silent failure mode: if the celebration never surfaced (app
+        // killed between submit and dismiss, a prior buggy version that
+        // seeded the gate, an unmount race), the gate was set to today and
+        // the user got locked out for the rest of the day with no way to
+        // recover short of clearing AsyncStorage. Writing on dismiss is the
+        // only path that guarantees one celebration per local day AND
+        // survives those failure modes — if no celebration was shown, the
+        // next session simply tries again.
+        const today = localTodayISO();
+        if (p.streak_active_today && effectivePrevStreakDate !== today) {
+          setPendingStreakUnlock({
+            streak_current: p.streak_current,
+            streak_best: p.streak_best,
+            is_new_best:
+              p.streak_current >= 2 && p.streak_current === p.streak_best,
+          });
+        }
+      } catch {
+        // silent — overlay can wait for the next successful fetch
+      }
+    })();
+
     return session;
   },
 };
@@ -342,8 +560,69 @@ export {
   ensureCacheHydrated,
   getCached,
   invalidatePrefix,
+  pruneCacheByPrefix,
   setCached,
   updateCached,
   useCached,
   useSWR,
 } from "@/lib/cache";
+
+// Full cache resync. Every refresh in the app (pull-to-refresh on /plans,
+// /plan/{id}, profile; useFocusEffect on those screens) routes through here
+// so the device-side cache always mirrors what the server has. Two motivating
+// scenarios:
+//   - During the hackathon we reset Supabase data between tests. Per-screen
+//     refreshes only touched one cache key, so a /plans refresh would clear
+//     the list but leave stale plan:{id} / profile / session:{dayId} entries
+//     until the user happened to revisit each screen.
+//   - The server is the source of truth for derived state (achievements,
+//     streaks, top filler). Refreshing in one place should pull in the new
+//     truth everywhere.
+//
+// Implementation: fetch plans + profile in parallel via Promise.allSettled
+// (one failing shouldn't block the other from updating its cache). On plans
+// success we ALSO write each plan into its detail cache (the response already
+// carries `days` inline, no extra network) and prune orphan plan + session
+// rows. On profile success we update the profile cache. If either fetch
+// failed, the first error is rethrown so the caller can surface it.
+export async function syncAllCaches(deviceId: string): Promise<void> {
+  const [plansResult, profileResult] = await Promise.allSettled([
+    api.getPlans(deviceId),
+    api.getProfile(deviceId),
+  ]);
+
+  let firstError: Error | null = null;
+
+  if (plansResult.status === "fulfilled") {
+    const plans = plansResult.value;
+    setCached(cacheKeys.plans(deviceId), plans, { persist: true });
+    const keepPlan = new Set(plans.map((p) => cacheKeys.plan(p.id)));
+    for (const p of plans) {
+      setCached(cacheKeys.plan(p.id), p, { persist: true });
+    }
+    // Drop plan caches for IDs the server no longer knows about — happens
+    // after deletePlan from another device or a DB reset during testing.
+    pruneCacheByPrefix("plan:", keepPlan);
+    // Session caches are tied to plan_days. Cheapest correct policy is to
+    // invalidate them all and let the result screen refetch lazily on revisit.
+    invalidatePrefix("session:");
+  } else {
+    firstError =
+      plansResult.reason instanceof Error
+        ? plansResult.reason
+        : new Error(String(plansResult.reason));
+  }
+
+  if (profileResult.status === "fulfilled") {
+    setCached(cacheKeys.profile(deviceId), profileResult.value, {
+      persist: true,
+    });
+  } else if (!firstError) {
+    firstError =
+      profileResult.reason instanceof Error
+        ? profileResult.reason
+        : new Error(String(profileResult.reason));
+  }
+
+  if (firstError) throw firstError;
+}

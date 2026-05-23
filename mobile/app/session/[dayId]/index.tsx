@@ -8,6 +8,7 @@ import {
 import * as Haptics from "expo-haptics";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import {
+  ArrowClockwiseIcon as ArrowClockwise,
   ArrowLeftIcon as ArrowLeft,
   ArrowRightIcon as ArrowRight,
   CheckIcon as Check,
@@ -29,15 +30,20 @@ import Animated, {
   FadeInDown,
   FadeOut,
   SlideInRight,
+  interpolateColor,
   useAnimatedStyle,
   useSharedValue,
+  withDelay,
+  withRepeat,
   withSequence,
+  withSpring,
   withTiming,
   ZoomIn,
 } from "react-native-reanimated";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { Card } from "@/components/ui/Card";
+import { DayCardStatus } from "@/components/ui/DayCard";
 import { DuoButton } from "@/components/ui/DuoButton";
 import { LogoMark } from "@/components/ui/LogoMark";
 import { Pill } from "@/components/ui/Pill";
@@ -88,9 +94,13 @@ function formatMmSs(totalSeconds: number): string {
 
 export default function SessionRecord() {
   const router = useRouter();
+  const goBackOrHome = () => {
+    if (router.canGoBack()) router.back();
+    else router.replace("/plans");
+  };
   const { dayId } = useLocalSearchParams<{ dayId: string }>();
   const [day, setDay] = useState<PlanDay | null>(null);
-  const [_plan, setPlan] = useState<Plan | null>(null);
+  const [plan, setPlan] = useState<Plan | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -102,6 +112,10 @@ export default function SessionRecord() {
   const [elapsed, setElapsed] = useState(0);
   const [uploading, setUploading] = useState(false);
   const [pendingResult, setPendingResult] = useState<SessionResult | null>(null);
+  // Motivational sentence from Haiku, fetched in parallel with the upload so
+  // the celebration flow can land on a personalized message without ever
+  // looking like it's waiting on the network.
+  const [pendingMotivation, setPendingMotivation] = useState<string | null>(null);
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
   const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const cancelledRef = useRef(false);
@@ -234,6 +248,27 @@ export default function SessionRecord() {
       return;
     }
     setUploading(true);
+    setPendingMotivation(null);
+
+    // Fire the motivation fetch in parallel with the session upload. Both
+    // requests run independently; the celebration flow gates the transition
+    // to the transcript phase on the session result and uses whatever
+    // motivation text has arrived (or a fallback) when it gets there.
+    if (plan) {
+      const planId = plan.id;
+      void (async () => {
+        try {
+          const id = await getDeviceId();
+          const msg = await api.getMotivation({ device_id: id, plan_id: planId });
+          if (cancelledRef.current) return;
+          setPendingMotivation(msg);
+        } catch {
+          if (cancelledRef.current) return;
+          setPendingMotivation("Estás um passo mais perto. Mais um treino feito.");
+        }
+      })();
+    }
+
     try {
       const id = await getDeviceId();
       const result = await api.submitSession({
@@ -242,9 +277,9 @@ export default function SessionRecord() {
         audio_uri: uri,
       });
       if (cancelledRef.current) return;
-      // Hold the result in state — the uploading screen will fill its progress
-      // bar to 100%, reveal the transcript, and only navigate when the user
-      // taps "VER FEEDBACK".
+      // Hold the result in state — the celebration flow plays its scripted
+      // choreography and only navigates to the result screen when the user
+      // taps "VER FEEDBACK" on the transcript phase.
       setPendingResult(result);
     } catch (e) {
       if (cancelledRef.current) return;
@@ -274,7 +309,7 @@ export default function SessionRecord() {
           <DuoButton
             title="VOLTAR"
             variant="secondary"
-            onPress={() => router.back()}
+            onPress={() => goBackOrHome()}
             fullWidth={false}
           />
         </View>
@@ -282,16 +317,31 @@ export default function SessionRecord() {
     );
   }
 
-  if (uploading) {
+  if (uploading && plan) {
     return (
-      <UploadingScreen
+      <CelebrationFlow
+        plan={plan}
+        day={day}
         pendingResult={pendingResult}
+        motivation={pendingMotivation}
         onContinue={() => {
-          if (!pendingResult || !day) return;
+          if (!pendingResult) return;
           router.replace({
             pathname: `/session/${day.id}/result`,
             params: { result: JSON.stringify(pendingResult) },
           });
+        }}
+        onRetry={() => {
+          // The just-submitted session row stays on the backend (it's the
+          // simpler hackathon path), but the user re-records for the same
+          // day and the next submitSession overwrites the cached value.
+          // Reset everything so we can run the record → celebration loop
+          // again from scratch.
+          setPendingResult(null);
+          setPendingMotivation(null);
+          setUploading(false);
+          setElapsed(0);
+          setStep("question");
         }}
       />
     );
@@ -301,7 +351,7 @@ export default function SessionRecord() {
     return (
       <IntroStep
         day={day}
-        onClose={() => router.back()}
+        onClose={() => goBackOrHome()}
         onContinue={() => setStep("question")}
       />
     );
@@ -347,188 +397,723 @@ export default function SessionRecord() {
 }
 
 // ---------------------------------------------------------------------------
-// Uploading screen: optimistic celebration + animated loading bar.
-// The bar is intentionally faster than the real backend: it sprints to ~60%
-// in 1.5s, eases to ~92% over 8s, then crawls toward 99% — so the user feels
-// "quase!" almost immediately and the transcript card fades in mid-animation
-// (the server response usually arrives somewhere in the crawl phase). When
-// pendingResult arrives we just push the bar to 100% in 400ms and the
-// "VER FEEDBACK" CTA appears.
+// Celebration flow — a 4-act choreography that runs while the session upload
+// + analysis pipeline does its thing in the background. The goal is to never
+// look like "loading": each scene plays for a fixed window and the user only
+// sees the transcript + "VER FEEDBACK" CTA once the result has actually
+// arrived.
+//
+//   boa        ~2.1s  big "Boa!" with confetti + success haptic
+//   rail       ~4.4s  mini day list with the just-finished day flipping
+//                     from "current" (blue ring) to "done" (filled + check)
+//   motivation  ≥2.4s personalized pt-PT sentence from Haiku, held with a
+//                     subtle breathing pulse until pendingResult arrives
+//   transcript  --    transcript card + CTA, mirrors the old final state
 // ---------------------------------------------------------------------------
 
-const UPLOADING_SUBTITLES = [
-  "Gravaste a tua resposta. Já estamos a ouvir.",
-  "Boa entrega! A processar...",
-  "Excelente. Vamos analisar a tua resposta.",
-  "Já está. Estamos a afinar o feedback para ti.",
-] as const;
+type CelebrationPhase = "boa" | "rail" | "motivation" | "transcript";
 
-function UploadingScreen({
+// Crossfade timing between scenes. Kept short and snappy (560ms) — what the
+// user wants slower is the DWELL on each scene, not the wipe between them.
+// Long crossfades looked sluggish; the actual pacing knob is the setTimeout
+// values below.
+const PHASE_FADE_MS = 560;
+
+function CelebrationFlow({
+  plan,
+  day,
   pendingResult,
+  motivation,
   onContinue,
+  onRetry,
 }: {
+  plan: Plan;
+  day: PlanDay;
   pendingResult: SessionResult | null;
+  motivation: string | null;
   onContinue: () => void;
+  onRetry: () => void;
 }) {
-  // Pick a subtitle once per mount — no rotation while the user waits.
-  const subtitle = useMemo(
-    () =>
-      UPLOADING_SUBTITLES[
-        Math.floor(Math.random() * UPLOADING_SUBTITLES.length)
-      ],
-    [],
-  );
+  const [phase, setPhase] = useState<CelebrationPhase>("boa");
+  // Track when the motivation phase started so we can enforce a minimum dwell
+  // time before advancing — never less than ~2.4s, even if the upload has
+  // already finished, so the message has time to land.
+  const motivationStartRef = useRef<number | null>(null);
 
-  // Progress is a 0..1 shared value driving the bar's width. The two-phase
-  // animation is implemented by chaining withTiming calls: first to 0.92 with
-  // a long ease-out curve (~28s), then — once the result arrives — to 1.0 in
-  // 400ms so the bar visibly "completes" before the CTA appears.
-  const progress = useSharedValue(0);
-
-  useEffect(() => {
-    // Optimistic sprint → ease → crawl. Faster than the real backend so the
-    // user gets the "almost there" feeling within seconds, and the transcript
-    // card appears mid-animation rather than after the bar finishes.
-    progress.value = withSequence(
-      withTiming(0.6, { duration: 1500, easing: Easing.out(Easing.cubic) }),
-      withTiming(0.92, { duration: 8000, easing: Easing.out(Easing.quad) }),
-      withTiming(0.99, { duration: 30000, easing: Easing.linear }),
-    );
-    // Intentionally run once on mount only.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // Dwell times per scene. Each scene needs enough air for the user to read
+  // and feel the moment before the next one slides in. "Boa!" has to land,
+  // the day rail has to play its current → done animation AND sit on the
+  // result, and the motivational sentence has to be readable. Numbers tuned
+  // toward "slow and confident", since the user explicitly wants the pacing
+  // to feel relaxed rather than rushed.
+  const BOA_DWELL_MS = 3600;
+  const RAIL_DWELL_MS = 6500;
+  const MOTIVATION_MIN_DWELL_MS = 3000;
 
   useEffect(() => {
-    if (pendingResult) {
-      progress.value = withTiming(1, {
-        duration: 400,
-        easing: Easing.out(Easing.cubic),
-      });
+    if (phase === "boa") {
+      const t = setTimeout(() => setPhase("rail"), BOA_DWELL_MS);
+      return () => clearTimeout(t);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingResult]);
+    if (phase === "rail") {
+      const t = setTimeout(() => setPhase("motivation"), RAIL_DWELL_MS);
+      return () => clearTimeout(t);
+    }
+    return undefined;
+  }, [phase]);
 
-  const barStyle = useAnimatedStyle(() => ({
-    width: `${progress.value * 100}%`,
-  }));
+  useEffect(() => {
+    if (phase !== "motivation") return;
+    motivationStartRef.current = Date.now();
+  }, [phase]);
 
-  const ready = pendingResult !== null;
+  useEffect(() => {
+    if (phase !== "motivation" || !pendingResult) return;
+    const startedAt = motivationStartRef.current ?? Date.now();
+    const elapsed = Date.now() - startedAt;
+    const remaining = Math.max(0, MOTIVATION_MIN_DWELL_MS - elapsed);
+    const t = setTimeout(() => setPhase("transcript"), remaining);
+    return () => clearTimeout(t);
+  }, [phase, pendingResult]);
 
-  const footer = ready ? (
-    <Animated.View entering={FadeInDown.duration(360)}>
-      <DuoButton
-        title="VER FEEDBACK"
-        iconRight={ArrowRight}
-        variant="primary"
-        onPress={onContinue}
-      />
-    </Animated.View>
-  ) : null;
-
+  // Each phase renders inside its own keyed Animated.View with absolute
+  // positioning. When `phase` flips, React unmounts the old branch — but
+  // Reanimated catches that and runs the exiting animation first, while the
+  // new branch's entering animation runs in parallel. Result: a real
+  // crossfade where both scenes are visible during the transition window,
+  // instead of the instant swap we had before.
   return (
-    <Screen
-      footer={footer}
-      scroll={ready}
-      contentStyle={ready ? undefined : { justifyContent: "center" }}
-    >
-      <Animated.View
-        entering={FadeIn.duration(220)}
-        style={uploadingStyles.headerBlock}
-      >
-        <Text style={uploadingStyles.celebration}>Boa!</Text>
-        <Text style={uploadingStyles.subtitle}>{subtitle}</Text>
-      </Animated.View>
-
-      <View style={uploadingStyles.barBlock}>
-        <View style={uploadingStyles.barTrack}>
-          <Animated.View style={[uploadingStyles.barFill, barStyle]} />
-        </View>
-        <Text style={uploadingStyles.barCaption}>
-          {ready ? "Pronto." : "A processar..."}
-        </Text>
+    <SafeAreaView style={styles.safe}>
+      <View style={celebrationStyles.flex}>
+        {phase === "boa" && (
+          <Animated.View
+            key="boa"
+            entering={FadeIn.duration(PHASE_FADE_MS)}
+            exiting={FadeOut.duration(PHASE_FADE_MS)}
+            style={StyleSheet.absoluteFillObject}
+          >
+            <BoaPhase />
+          </Animated.View>
+        )}
+        {phase === "rail" && (
+          <Animated.View
+            key="rail"
+            entering={FadeIn.duration(PHASE_FADE_MS)}
+            exiting={FadeOut.duration(PHASE_FADE_MS)}
+            style={StyleSheet.absoluteFillObject}
+          >
+            <RailPhase plan={plan} dayId={day.id} />
+          </Animated.View>
+        )}
+        {phase === "motivation" && (
+          <Animated.View
+            key="motivation"
+            entering={FadeIn.duration(PHASE_FADE_MS)}
+            exiting={FadeOut.duration(PHASE_FADE_MS)}
+            style={StyleSheet.absoluteFillObject}
+          >
+            <MotivationPhase message={motivation} />
+          </Animated.View>
+        )}
+        {phase === "transcript" && pendingResult && (
+          <Animated.View
+            key="transcript"
+            entering={FadeIn.duration(PHASE_FADE_MS)}
+            style={StyleSheet.absoluteFillObject}
+          >
+            <TranscriptPhase
+              data={pendingResult}
+              onContinue={onContinue}
+              onRetry={onRetry}
+            />
+          </Animated.View>
+        )}
       </View>
-
-      {ready && pendingResult ? (
-        <Animated.View entering={FadeInDown.duration(360)}>
-          <Card style={uploadingStyles.transcriptCard}>
-            <Text style={uploadingStyles.transcriptCaption}>Transcrição</Text>
-            <ScrollView
-              style={uploadingStyles.transcriptScroll}
-              showsVerticalScrollIndicator
-            >
-              <Text style={uploadingStyles.transcriptText}>
-                {pendingResult.transcript}
-              </Text>
-            </ScrollView>
-          </Card>
-        </Animated.View>
-      ) : null}
-    </Screen>
+    </SafeAreaView>
   );
 }
 
-const uploadingStyles = StyleSheet.create({
-  headerBlock: {
-    paddingBottom: spacing.xl,
+// --- Phase 1: "Boa!" ---------------------------------------------------------
+
+function BoaPhase() {
+  const scale = useSharedValue(0.4);
+  const opacity = useSharedValue(0);
+
+  useEffect(() => {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(
+      () => {},
+    );
+    opacity.value = withTiming(1, { duration: 440 });
+    scale.value = withSpring(1, { mass: 0.9, damping: 9, stiffness: 150 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const aStyle = useAnimatedStyle(() => ({
+    opacity: opacity.value,
+    transform: [{ scale: scale.value }],
+  }));
+
+  return (
+    <View style={celebrationStyles.phaseRoot}>
+      <Confetti color={palette.primary[500]} />
+      <Animated.Text style={[celebrationStyles.boa, aStyle]}>Boa!</Animated.Text>
+      <Animated.Text
+        entering={FadeInDown.duration(540).delay(500)}
+        style={celebrationStyles.boaSubtitle}
+      >
+        Gravaste mais um treino.
+      </Animated.Text>
+    </View>
+  );
+}
+
+// Lightweight confetti — 16 dots launched from screen center with random
+// horizontal drift + gravity-style fall. Pure View animation, no extra deps.
+// Same shape as the score-reveal confetti in result.tsx, scoped here so the
+// celebration screen doesn't depend on result internals.
+
+const CELEBRATION_CONFETTI_COUNT = 16;
+
+function Confetti({ color }: { color: string }) {
+  return (
+    <View style={celebrationStyles.confettiLayer} pointerEvents="none">
+      {Array.from({ length: CELEBRATION_CONFETTI_COUNT }).map((_, i) => (
+        <ConfettiDot key={i} index={i} color={color} />
+      ))}
+    </View>
+  );
+}
+
+function ConfettiDot({ index, color }: { index: number; color: string }) {
+  const tx = useSharedValue(0);
+  const ty = useSharedValue(0);
+  const rot = useSharedValue(0);
+  const op = useSharedValue(0);
+
+  const seed = useMemo(() => {
+    const angle = -Math.PI / 2 + (Math.random() - 0.5) * (Math.PI * 0.78);
+    const speed = 140 + Math.random() * 160;
+    return {
+      dx: Math.cos(angle) * speed,
+      dyUp: Math.sin(angle) * speed,
+      dyDown: 320 + Math.random() * 120,
+      rot: Math.random() * 720 - 360,
+      delay: index * 22,
+      size: 6 + Math.random() * 4,
+      tint: Math.random() < 0.55 ? color : palette.primary[300],
+    };
+  }, [index, color]);
+
+  useEffect(() => {
+    op.value = withDelay(
+      seed.delay,
+      withSequence(
+        withTiming(1, { duration: 100 }),
+        withTiming(1, { duration: 800 }),
+        withTiming(0, { duration: 360 }),
+      ),
+    );
+    tx.value = withDelay(
+      seed.delay,
+      withTiming(seed.dx, { duration: 1200, easing: Easing.out(Easing.quad) }),
+    );
+    ty.value = withDelay(
+      seed.delay,
+      withSequence(
+        withTiming(seed.dyUp, { duration: 380, easing: Easing.out(Easing.quad) }),
+        withTiming(seed.dyDown, { duration: 820, easing: Easing.in(Easing.quad) }),
+      ),
+    );
+    rot.value = withDelay(
+      seed.delay,
+      withTiming(seed.rot, { duration: 1200, easing: Easing.out(Easing.cubic) }),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const style = useAnimatedStyle(() => ({
+    transform: [
+      { translateX: tx.value },
+      { translateY: ty.value },
+      { rotate: `${rot.value}deg` },
+    ],
+    opacity: op.value,
+  }));
+
+  return (
+    <Animated.View
+      style={[
+        celebrationStyles.confettiDot,
+        { width: seed.size, height: seed.size * 1.6, backgroundColor: seed.tint },
+        style,
+      ]}
+    />
+  );
+}
+
+// --- Phase 2: day rail with current → done animation -------------------------
+
+function RailPhase({ plan, dayId }: { plan: Plan; dayId: string }) {
+  return (
+    <View style={celebrationStyles.railRoot}>
+      <Animated.Text
+        entering={FadeInDown.duration(420).delay(80)}
+        style={celebrationStyles.railEyebrow}
+      >
+        Plano
+      </Animated.Text>
+      <Animated.Text
+        entering={FadeInDown.duration(480).delay(160)}
+        style={celebrationStyles.railTitle}
+      >
+        Mais um dia feito.
+      </Animated.Text>
+      <View style={celebrationStyles.railList}>
+        {plan.days.map((d, i) => {
+          // Render the just-finished day as "current → done" (animated).
+          // Other days reflect their real status. We treat the live day as
+          // still-current visually until the animation flips it.
+          const isHero = d.id === dayId;
+          const status: DayCardStatus = isHero
+            ? "current"
+            : d.completed_at
+              ? "done"
+              : "locked";
+          return (
+            <Animated.View
+              key={d.id}
+              entering={FadeInDown.duration(380).delay(260 + i * 70)}
+            >
+              <RailRow
+                index={d.day_index}
+                title={d.theme}
+                status={status}
+                animateToDone={isHero}
+              />
+            </Animated.View>
+          );
+        })}
+      </View>
+    </View>
+  );
+}
+
+function RailRow({
+  index,
+  title,
+  status,
+  animateToDone,
+}: {
+  index: number;
+  title: string;
+  status: DayCardStatus;
+  animateToDone: boolean;
+}) {
+  const isDone = status === "done";
+  const isCurrent = status === "current";
+  const isLocked = status === "locked";
+
+  // transition: 0 = current look (white circle, blue ring), 1 = done look
+  // (filled blue + white check). Driven by interpolateColor on the indicator.
+  const transition = useSharedValue(isDone ? 1 : 0);
+  const bounce = useSharedValue(0);
+
+  useEffect(() => {
+    if (!animateToDone) return;
+    // Hold on the "current" look briefly so the user reads "this was today's
+    // day" before it ticks over.
+    transition.value = withDelay(
+      1500,
+      withTiming(1, { duration: 720, easing: Easing.out(Easing.cubic) }),
+    );
+    bounce.value = withDelay(
+      1800,
+      withSequence(
+        withTiming(1, { duration: 260, easing: Easing.out(Easing.quad) }),
+        withTiming(0, { duration: 320, easing: Easing.in(Easing.quad) }),
+        withTiming(0.42, { duration: 220, easing: Easing.out(Easing.quad) }),
+        withTiming(0, { duration: 260, easing: Easing.in(Easing.quad) }),
+      ),
+    );
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(
+      () => {},
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [animateToDone]);
+
+  const bounceStyle = useAnimatedStyle(() => ({
+    transform: [
+      { translateY: -8 * bounce.value },
+      { scale: 1 + 0.025 * bounce.value },
+    ],
+  }));
+
+  const indicatorStyle = useAnimatedStyle(() => {
+    const bg = interpolateColor(
+      transition.value,
+      [0, 1],
+      [palette.white, palette.primary[500]],
+    );
+    return { backgroundColor: bg };
+  });
+
+  const checkStyle = useAnimatedStyle(() => ({
+    opacity: transition.value,
+    transform: [{ scale: 0.45 + 0.55 * transition.value }],
+  }));
+
+  return (
+    <Animated.View style={bounceStyle}>
+      <View
+        style={[
+          railStyles.card,
+          isCurrent || animateToDone ? railStyles.cardCurrent : null,
+          isLocked ? railStyles.cardLocked : null,
+        ]}
+      >
+        {isLocked ? (
+          <View style={[railStyles.indicator, railStyles.indicatorLocked]} />
+        ) : isDone ? (
+          <View style={[railStyles.indicator, railStyles.indicatorDone]}>
+            <Check size={18} color={palette.white} weight="bold" />
+          </View>
+        ) : (
+          <Animated.View
+            style={[
+              railStyles.indicator,
+              railStyles.indicatorCurrent,
+              indicatorStyle,
+            ]}
+          >
+            <Animated.View style={checkStyle}>
+              <Check size={18} color={palette.white} weight="bold" />
+            </Animated.View>
+          </Animated.View>
+        )}
+        <View style={railStyles.content}>
+          <Text
+            style={[
+              railStyles.eyebrow,
+              isCurrent || animateToDone ? railStyles.eyebrowCurrent : null,
+              isLocked ? railStyles.eyebrowLocked : null,
+            ]}
+          >{`Dia ${index}`}</Text>
+          <Text
+            style={[railStyles.title, isLocked ? railStyles.titleLocked : null]}
+            numberOfLines={1}
+          >
+            {title}
+          </Text>
+        </View>
+      </View>
+    </Animated.View>
+  );
+}
+
+// --- Phase 3: motivational message -----------------------------------------
+
+function MotivationPhase({ message }: { message: string | null }) {
+  // Breathing pulse: very subtle scale loop. Communicates "alive" without
+  // resorting to a spinner if the upload is still in flight.
+  const pulse = useSharedValue(1);
+  useEffect(() => {
+    pulse.value = withRepeat(
+      withSequence(
+        withTiming(1.025, {
+          duration: 1500,
+          easing: Easing.inOut(Easing.quad),
+        }),
+        withTiming(1, { duration: 1500, easing: Easing.inOut(Easing.quad) }),
+      ),
+      -1,
+      false,
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const pulseStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: pulse.value }],
+  }));
+
+  // Wait for the model's response before showing the full sentence — if it's
+  // not in yet, the fallback is already short and complete, so we still show
+  // SOMETHING rather than blank space.
+  const text = message ?? "Estás um passo mais perto.";
+
+  return (
+    <View style={celebrationStyles.motivationRoot}>
+      <Animated.Text
+        entering={FadeInDown.duration(540).delay(120)}
+        style={celebrationStyles.motivationEyebrow}
+      >
+        Para ti
+      </Animated.Text>
+      <Animated.Text
+        entering={FadeInDown.duration(720).delay(280)}
+        style={[celebrationStyles.motivationText, pulseStyle]}
+      >
+        {text}
+      </Animated.Text>
+    </View>
+  );
+}
+
+// --- Phase 4: transcript + CTA ---------------------------------------------
+// Centered layout: eyebrow + title + transcript card + two stacked buttons,
+// all vertically and horizontally centered. Replaces the previous Screen
+// `footer` pattern because the user explicitly wanted the CTAs to live with
+// the rest of the content instead of pinned to the bottom edge.
+
+function TranscriptPhase({
+  data,
+  onContinue,
+  onRetry,
+}: {
+  data: SessionResult;
+  onContinue: () => void;
+  onRetry: () => void;
+}) {
+  return (
+    <View style={transcriptStyles.root}>
+      <Animated.View
+        entering={FadeIn.duration(620)}
+        style={transcriptStyles.headerBlock}
+      >
+        <Text style={transcriptStyles.eyebrow}>A tua resposta</Text>
+        <Text style={transcriptStyles.title}>Pronto para o feedback?</Text>
+      </Animated.View>
+
+      <Animated.View
+        entering={FadeInDown.duration(680).delay(180)}
+        style={transcriptStyles.cardBlock}
+      >
+        <Card style={transcriptStyles.card}>
+          <Text style={transcriptStyles.caption}>Transcrição</Text>
+          <ScrollView
+            style={transcriptStyles.scroll}
+            showsVerticalScrollIndicator
+          >
+            <Text style={transcriptStyles.text}>{data.transcript}</Text>
+          </ScrollView>
+        </Card>
+      </Animated.View>
+
+      <Animated.View
+        entering={FadeInDown.duration(680).delay(340)}
+        style={transcriptStyles.actions}
+      >
+        <DuoButton
+          title="VER FEEDBACK"
+          iconRight={ArrowRight}
+          variant="primary"
+          onPress={onContinue}
+        />
+        <DuoButton
+          title="REPETIR"
+          iconRight={ArrowClockwise}
+          variant="secondary"
+          onPress={onRetry}
+        />
+      </Animated.View>
+    </View>
+  );
+}
+
+const celebrationStyles = StyleSheet.create({
+  flex: { flex: 1 },
+  phaseRoot: {
+    flex: 1,
     alignItems: "center",
-    gap: spacing.sm,
+    justifyContent: "center",
+    paddingHorizontal: spacing.xl,
   },
-  celebration: {
+  boa: {
     fontFamily: fonts.black,
-    fontSize: 64,
-    lineHeight: 72,
+    fontSize: 104,
+    lineHeight: 112,
     color: palette.primary[600],
     textAlign: "center",
   },
-  subtitle: {
-    ...t.body,
-    color: palette.neutral[600],
+  boaSubtitle: {
+    fontFamily: fonts.semibold,
+    fontSize: 18,
+    lineHeight: 26,
+    color: palette.neutral[500],
     textAlign: "center",
-    paddingHorizontal: spacing.md,
+    marginTop: spacing.lg,
   },
-  barBlock: {
-    gap: spacing.sm,
-    paddingVertical: spacing.lg,
+  confettiLayer: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: "center",
+    justifyContent: "center",
   },
-  barTrack: {
-    height: 14,
-    width: "100%",
-    backgroundColor: palette.primary[100],
-    borderRadius: radii.pill,
-    overflow: "hidden",
+  confettiDot: {
+    position: "absolute",
+    borderRadius: 2,
   },
-  barFill: {
-    height: "100%",
-    backgroundColor: palette.primary[500],
-    borderRadius: radii.pill,
+  railRoot: {
+    flex: 1,
+    paddingHorizontal: spacing.xl,
+    paddingTop: spacing.xxl,
+    justifyContent: "center",
   },
-  barCaption: {
-    ...t.caption,
-    color: palette.primary[600],
-    textAlign: "center",
+  railEyebrow: {
+    ...t.eyebrow,
+    textAlign: "left",
+  },
+  railTitle: {
+    fontFamily: fonts.black,
+    fontSize: 32,
+    lineHeight: 38,
+    color: colors.text,
     marginTop: spacing.xs,
+    marginBottom: spacing.xl,
   },
-  transcriptCard: {
+  railList: {
+    gap: spacing.md,
+  },
+  motivationRoot: {
+    flex: 1,
+    paddingHorizontal: spacing.xl,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  motivationEyebrow: {
+    ...t.eyebrow,
+    textAlign: "center",
+    marginBottom: spacing.lg,
+  },
+  motivationText: {
+    fontFamily: fonts.black,
+    fontSize: 28,
+    lineHeight: 38,
+    color: colors.text,
+    textAlign: "center",
+  },
+});
+
+const transcriptStyles = StyleSheet.create({
+  // Vertical+horizontal center. The phase wrapper above is absoluteFillObject
+  // inside the celebration SafeAreaView, so this View owns the layout.
+  root: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    paddingHorizontal: spacing.xl,
+    gap: spacing.xl,
+  },
+  headerBlock: {
+    alignItems: "center",
+    gap: spacing.xs,
+  },
+  eyebrow: {
+    ...t.eyebrow,
+    textAlign: "center",
+  },
+  title: {
+    fontFamily: fonts.black,
+    fontSize: 28,
+    lineHeight: 34,
+    color: colors.text,
+    textAlign: "center",
+  },
+  cardBlock: {
+    width: "100%",
+  },
+  card: {
     backgroundColor: palette.neutral[50],
     borderColor: palette.neutral[200],
     gap: spacing.md,
-    marginTop: spacing.md,
   },
-  transcriptCaption: {
+  caption: {
     ...t.caption,
     color: palette.neutral[500],
+    textAlign: "center",
   },
-  // ~Half the screen for the scroll area. 320 is a comfortable cap that fits
-  // even on smaller phones while leaving room for the celebration block and
-  // the footer CTA.
-  transcriptScroll: {
-    maxHeight: 320,
+  scroll: {
+    // Capped so the transcript card doesn't push the buttons off-screen on
+    // short devices. Long takes scroll inside the card.
+    maxHeight: 240,
   },
-  transcriptText: {
+  text: {
     fontFamily: fonts.regular,
     fontSize: 14,
     lineHeight: 21,
     color: palette.neutral[700],
+    textAlign: "center",
+  },
+  actions: {
+    width: "100%",
+    gap: spacing.sm,
+  },
+});
+
+const RAIL_INDICATOR_SIZE = 28;
+
+const railStyles = StyleSheet.create({
+  card: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: palette.white,
+    borderRadius: radii.lg,
+    borderWidth: 1,
+    borderColor: palette.neutral[200],
+    paddingVertical: spacing.lg,
+    paddingHorizontal: spacing.lg,
+    gap: spacing.md,
+  },
+  cardCurrent: {
+    backgroundColor: palette.primary[50],
+    borderColor: palette.primary[500],
+    borderWidth: 2,
+  },
+  cardLocked: {
+    opacity: 0.7,
+  },
+  indicator: {
+    width: RAIL_INDICATOR_SIZE,
+    height: RAIL_INDICATOR_SIZE,
+    borderRadius: RAIL_INDICATOR_SIZE / 2,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: palette.white,
+    borderWidth: 2,
+    borderColor: palette.neutral[300],
+  },
+  indicatorCurrent: {
+    backgroundColor: palette.white,
+    borderColor: palette.primary[500],
+  },
+  indicatorDone: {
+    backgroundColor: palette.primary[500],
+    borderColor: palette.primary[500],
+  },
+  indicatorLocked: {
+    backgroundColor: palette.neutral[100],
+    borderColor: palette.neutral[300],
+  },
+  content: {
+    flex: 1,
+    justifyContent: "center",
+  },
+  eyebrow: {
+    ...t.eyebrow,
+    marginBottom: 4,
+  },
+  eyebrowCurrent: {
+    color: palette.primary[600],
+  },
+  eyebrowLocked: {
+    color: palette.neutral[400],
+  },
+  title: {
+    fontFamily: fonts.extrabold,
+    fontSize: 18,
+    lineHeight: 22,
+    color: colors.text,
+  },
+  titleLocked: {
+    color: palette.neutral[400],
   },
 });
 

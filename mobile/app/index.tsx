@@ -7,7 +7,6 @@ import { LogoMark } from "@/components/ui/LogoMark";
 import { Screen } from "@/components/ui/Screen";
 import { Plan, api, cacheKeys, getCached, setCached } from "@/lib/api";
 import { getDeviceId } from "@/lib/deviceId";
-import { clearLastPlanId, getLastPlanId } from "@/lib/lastPlan";
 
 export default function Index() {
   const router = useRouter();
@@ -17,35 +16,15 @@ export default function Index() {
     (async () => {
       try {
         const id = await getDeviceId();
-        const lastId = await getLastPlanId();
 
-        // Fast path: cache hydrated from disk lets us route immediately, before
-        // any network round-trip. The fetched data still flows through the
-        // detail screen's SWR loop.
-        if (lastId) {
-          const cachedPlan = getCached<Plan>(cacheKeys.plan(lastId));
-          if (cachedPlan) {
-            router.replace(`/plan/${lastId}`);
-            return;
-          }
-        }
+        // Plans home is always the entry point. We still hydrate the cache so
+        // the list paints without a spinner.
         const cachedList = getCached<Plan[]>(cacheKeys.plans(id));
         if (cachedList) {
           router.replace(cachedList.length > 0 ? "/plans" : "/onboarding");
           return;
         }
 
-        // Cold start: fall back to network.
-        if (lastId) {
-          const plan = await api.getPlan(lastId, id);
-          if (cancelled) return;
-          if (plan) {
-            setCached(cacheKeys.plan(plan.id), plan, { persist: true });
-            router.replace(`/plan/${plan.id}`);
-            return;
-          }
-          await clearLastPlanId();
-        }
         const plans = await api.getPlans(id);
         if (cancelled) return;
         setCached(cacheKeys.plans(id), plans, { persist: true });

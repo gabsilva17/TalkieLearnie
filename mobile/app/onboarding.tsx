@@ -4,7 +4,7 @@ import {
   CalendarBlankIcon as CalendarBlank,
   XIcon as X,
 } from "phosphor-react-native";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Platform,
   Pressable,
@@ -13,6 +13,13 @@ import {
   TextInput,
   View,
 } from "react-native";
+import Animated, {
+  Easing,
+  interpolateColor,
+  useAnimatedStyle,
+  useSharedValue,
+  withTiming,
+} from "react-native-reanimated";
 
 import { DuoButton } from "@/components/ui/DuoButton";
 import { Screen } from "@/components/ui/Screen";
@@ -20,6 +27,9 @@ import { api } from "@/lib/api";
 import { getDeviceId } from "@/lib/deviceId";
 import { setLastPlanId } from "@/lib/lastPlan";
 import { colors, fonts, palette, radii, spacing, type as t } from "@/lib/theme";
+
+const AnimatedTextInput = Animated.createAnimatedComponent(TextInput);
+const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 
 function tomorrow(): Date {
   const d = new Date();
@@ -103,7 +113,8 @@ export default function Onboarding() {
 
   function back() {
     if (step === 0) {
-      router.back();
+      if (router.canGoBack()) router.back();
+      else router.replace("/plans");
       return;
     }
     setStep(((step - 1) as Step));
@@ -114,10 +125,22 @@ export default function Onboarding() {
     if (d) setTargetDate(d);
   }
 
-  const inputStyle = (focused: boolean) => [
-    styles.input,
-    { borderColor: focused ? palette.primary[500] : palette.neutral[200] },
-  ];
+  // Single focus driver — at any step only one field is rendered, so a single
+  // 0→1 shared value can colour-shift whichever input is on screen.
+  const focusAnim = useSharedValue(0);
+  useEffect(() => {
+    focusAnim.value = withTiming(focusedField !== null ? 1 : 0, {
+      duration: 180,
+      easing: Easing.out(Easing.quad),
+    });
+  }, [focusedField, focusAnim]);
+  const animatedBorder = useAnimatedStyle(() => ({
+    borderColor: interpolateColor(
+      focusAnim.value,
+      [0, 1],
+      [palette.neutral[200], palette.primary[500]],
+    ),
+  }));
 
   return (
     <Screen scroll keyboardAware>
@@ -138,8 +161,8 @@ export default function Onboarding() {
 
         {step === 0 ? (
           <View style={styles.field}>
-            <TextInput
-              style={inputStyle(focusedField === "prep")}
+            <AnimatedTextInput
+              style={[styles.input, animatedBorder]}
               placeholder="Ex.: pitch de hackathon, entrevista de emprego..."
               placeholderTextColor={palette.neutral[400]}
               value={prepFor}
@@ -155,8 +178,8 @@ export default function Onboarding() {
         {step === 1 ? (
           <View style={styles.field}>
             {Platform.OS === "android" ? (
-              <Pressable
-                style={inputStyle(focusedField === "date")}
+              <AnimatedPressable
+                style={[styles.input, animatedBorder]}
                 onPress={() => {
                   setFocusedField("date");
                   setShowPicker(true);
@@ -166,7 +189,7 @@ export default function Onboarding() {
                   <CalendarBlank size={20} color={palette.neutral[600]} weight="bold" />
                   <Text style={styles.dateText}>{formatDatePt(targetDate)}</Text>
                 </View>
-              </Pressable>
+              </AnimatedPressable>
             ) : null}
             {showPicker ? (
               <View style={styles.pickerWrap}>
@@ -184,8 +207,8 @@ export default function Onboarding() {
 
         {step === 2 ? (
           <View style={styles.field}>
-            <TextInput
-              style={inputStyle(focusedField === "audience")}
+            <AnimatedTextInput
+              style={[styles.input, animatedBorder]}
               placeholder="Ex.: júri não técnico, investidor série A, manager directo..."
               placeholderTextColor={palette.neutral[400]}
               value={audience}

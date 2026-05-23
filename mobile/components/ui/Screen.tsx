@@ -10,6 +10,7 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import { BAR_HEIGHT } from "@/components/ui/BottomNav";
 import { colors, palette, spacing } from "@/lib/theme";
 
 type ScreenProps = {
@@ -21,6 +22,10 @@ type ScreenProps = {
   keyboardAware?: boolean;
   contentStyle?: ViewStyle;
   onRefresh?: () => void | Promise<unknown>;
+  /** Optional content pinned below the top safe-area inset and above the scroll/non-scroll body (e.g. TopBar). Does not scroll and stays above the keyboard. */
+  header?: ReactNode;
+  /** When true, reserve bottom padding equal to the persistent BottomNav's footprint (bar height + safe-area inset + breathing room). The bar itself is rendered persistently at the root layout, not inside Screen — so it doesn't fade with Stack transitions. */
+  reserveBottomNav?: boolean;
 };
 
 export function Screen({
@@ -32,12 +37,20 @@ export function Screen({
   keyboardAware = false,
   contentStyle,
   onRefresh,
+  header,
+  reserveBottomNav,
 }: ScreenProps) {
   const insets = useSafeAreaInsets();
   const horizontal = padded ? { paddingHorizontal: spacing.xl } : null;
 
-  // When there's no footer, content owns the bottom inset.
-  const contentBottomPad = footer ? 0 : insets.bottom + spacing.md;
+  // When there's a footer, footer owns the bottom inset. When the persistent
+  // root-level BottomNav is reserved, leave room for its bar + safe-area +
+  // breathing room. Otherwise content owns the inset directly.
+  const contentBottomPad = footer
+    ? 0
+    : reserveBottomNav
+      ? BAR_HEIGHT + insets.bottom + spacing.huge
+      : insets.bottom + spacing.md;
 
   const [refreshing, setRefreshing] = useState(false);
   const handleRefresh = useCallback(async () => {
@@ -137,6 +150,7 @@ export function Screen({
         },
       ]}
     >
+      {header}
       {body}
     </View>
   );

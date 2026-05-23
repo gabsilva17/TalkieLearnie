@@ -8,11 +8,12 @@ import { DayCard, DayCardStatus } from "@/components/ui/DayCard";
 import { DuoButton } from "@/components/ui/DuoButton";
 import { LogoMark } from "@/components/ui/LogoMark";
 import { Screen } from "@/components/ui/Screen";
+import { TopBar } from "@/components/ui/TopBar";
 import {
   Plan,
-  api,
   cacheKeys,
-  setCached,
+  getCached,
+  syncAllCaches,
   useCached,
 } from "@/lib/api";
 import { localTodayISO } from "@/lib/dayDate";
@@ -44,14 +45,18 @@ export default function PlanDetailScreen() {
     setError(null);
     try {
       const id = await getDeviceId();
-      const p = await api.getPlan(planId, id);
-      if (!p) {
+      // Full resync via the shared helper. After it returns, the per-plan
+      // cache reflects server truth and orphan rows have been pruned. If
+      // *this* plan no longer exists on the server (deleted on another
+      // device, DB reset), the cache entry is gone — bounce to /plans.
+      await syncAllCaches(id);
+      const synced = getCached<Plan>(cacheKeys.plan(planId));
+      if (!synced) {
         await clearLastPlanId();
         router.replace("/plans");
         return;
       }
-      setCached(cacheKeys.plan(p.id), p, { persist: true });
-      setLastPlanId(p.id).catch(() => {});
+      setLastPlanId(planId).catch(() => {});
     } catch (e) {
       setError((e as Error).message);
     }
@@ -76,23 +81,25 @@ export default function PlanDetailScreen() {
     };
   }, [plan]);
 
-  if (loading) {
-    return (
-      <SafeAreaView style={styles.safe}>
-        <Animated.View entering={FadeIn.duration(220)} style={styles.center}>
-          <LogoMark size="lg" />
-        </Animated.View>
-      </SafeAreaView>
-    );
-  }
-
   if (error && !plan) {
     return (
-      <SafeAreaView style={styles.safe}>
+      <SafeAreaView style={styles.safe} edges={["top", "left", "right"]}>
+        <TopBar title="Plano" onBack={() => router.push("/plans")} />
         <View style={styles.center}>
           <Text style={styles.errorText}>{error}</Text>
           <DuoButton title="TENTAR DE NOVO" onPress={load} fullWidth={false} />
         </View>
+      </SafeAreaView>
+    );
+  }
+
+  if (loading) {
+    return (
+      <SafeAreaView style={styles.safe} edges={["top", "left", "right"]}>
+        <TopBar title="Plano" onBack={() => router.push("/plans")} />
+        <Animated.View entering={FadeIn.duration(220)} style={styles.center}>
+          <LogoMark size="lg" />
+        </Animated.View>
       </SafeAreaView>
     );
   }
@@ -109,16 +116,18 @@ export default function PlanDetailScreen() {
     <Screen
       scroll
       onRefresh={load}
+      header={
+        <TopBar
+          title="Plano"
+          subtitle={subtitle}
+          onBack={() => router.push("/plans")}
+        />
+      }
+      reserveBottomNav
       contentStyle={{
-        paddingTop: spacing.lg,
-        paddingBottom: spacing.huge,
+        paddingTop: spacing.md,
       }}
     >
-      <View style={styles.hero}>
-        <Text style={styles.heroTitle}>Plano</Text>
-        <Text style={styles.heroSubtitle}>{subtitle}</Text>
-      </View>
-
       <Animated.View entering={FadeIn.duration(240)} style={styles.prep}>
         <Text style={styles.prepEyebrow}>A preparar</Text>
         <Text style={styles.prepText} numberOfLines={4}>
@@ -172,22 +181,6 @@ const styles = StyleSheet.create({
     padding: spacing.xl,
   },
   errorText: { ...t.body, color: colors.danger, textAlign: "center" },
-  hero: {
-    paddingBottom: spacing.xxl,
-  },
-  heroTitle: {
-    fontFamily: fonts.extrabold,
-    fontSize: 28,
-    lineHeight: 34,
-    color: colors.text,
-  },
-  heroSubtitle: {
-    fontFamily: fonts.semibold,
-    fontSize: 14,
-    lineHeight: 20,
-    color: palette.neutral[500],
-    marginTop: spacing.xs,
-  },
   prep: {
     paddingBottom: spacing.huge,
   },

@@ -1,8 +1,9 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from ..db import get_supabase
-from ..schemas import AskReq, AskResp
+from ..schemas import AskReq, AskResp, AskTranscribeResp
 from ..services.ask import answer
+from ..services.transcribe import transcribe_pt
 
 router = APIRouter(prefix="/ask", tags=["ask"])
 
@@ -44,3 +45,28 @@ def ask(req: AskReq) -> AskResp:
     if not reply:
         raise HTTPException(status_code=502, detail="empty reply from model")
     return AskResp(reply=reply)
+
+
+@router.post("/transcribe", response_model=AskTranscribeResp)
+def transcribe_ask(
+    device_id: str = Form(min_length=1),  # noqa: ARG001 - kept for parity with other endpoints
+    audio: UploadFile = File(...),
+) -> AskTranscribeResp:
+    try:
+        audio_bytes = audio.file.read()
+    finally:
+        audio.file.close()
+
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="empty audio")
+
+    try:
+        whisper = transcribe_pt(
+            audio_bytes,
+            filename=audio.filename or "question.m4a",
+            content_type=audio.content_type or "audio/m4a",
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"transcribe failed: {e}")
+
+    return AskTranscribeResp(text=(whisper.get("text") or "").strip())

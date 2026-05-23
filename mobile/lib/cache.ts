@@ -1,5 +1,11 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 
 // Stale-while-revalidate cache.
 //
@@ -57,6 +63,15 @@ export function invalidatePrefix(prefix: string): void {
   }
 }
 
+// Drop every entry under `prefix` that isn't in `keep`. Used after a full
+// resync to clear orphan rows (plans/sessions that no longer exist on the
+// server) without touching the entries we just wrote.
+export function pruneCacheByPrefix(prefix: string, keep: Set<string>): void {
+  for (const key of Array.from(memCache.keys())) {
+    if (key.startsWith(prefix) && !keep.has(key)) deleteCached(key);
+  }
+}
+
 export function updateCached<T>(key: string, updater: (prev: T | undefined) => T): void {
   const prev = getCached<T>(key);
   setCached(key, updater(prev), { persist: persistKeys.has(key) });
@@ -108,13 +123,28 @@ export function ensureCacheHydrated(): Promise<void> {
 
 // React hook: returns cached value (if any) and re-renders when it changes.
 // Doesn't fetch — call your loader separately and write through setCached.
+//
+// Backed by useSyncExternalStore. The previous implementation (useState +
+// useEffect subscribe) had a render→effect race: if setCached fired in the
+// window between render and the subscribe effect running, the notify hit
+// zero subscribers, the subscription went up late, and nothing ever
+// re-rendered the component even though the data was in memCache. That
+// stranded the Perfil screen on its ActivityIndicator. useSyncExternalStore
+// reconciles the snapshot across subscribe boundaries, so a write that lands
+// mid-mount still propagates to the consumer.
 export function useCached<T>(key: string | null): T | undefined {
-  const [, force] = useState(0);
-  useEffect(() => {
-    if (!key) return;
-    return subscribe(key, () => force((n) => n + 1));
-  }, [key]);
-  return key ? getCached<T>(key) : undefined;
+  const sub = useCallback(
+    (cb: () => void) => {
+      if (!key) return () => {};
+      return subscribe(key, cb);
+    },
+    [key],
+  );
+  const getSnapshot = useCallback(
+    () => (key ? getCached<T>(key) : undefined),
+    [key],
+  );
+  return useSyncExternalStore(sub, getSnapshot, getSnapshot);
 }
 
 // React hook: stale-while-revalidate.

@@ -1,3 +1,4 @@
+import * as Haptics from "expo-haptics";
 import { useFocusEffect, useRouter } from "expo-router";
 import {
   CaretRightIcon as CaretRight,
@@ -18,18 +19,26 @@ import {
   TextInput,
   View,
 } from "react-native";
-import Animated, { FadeIn, FadeInDown } from "react-native-reanimated";
+import Animated, {
+  Easing,
+  FadeIn,
+  FadeInDown,
+  useAnimatedStyle,
+  useSharedValue,
+  withTiming,
+} from "react-native-reanimated";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import { DuoButton } from "@/components/ui/DuoButton";
 import { LogoMark } from "@/components/ui/LogoMark";
+import { PressableScale } from "@/components/ui/PressableScale";
 import { Screen } from "@/components/ui/Screen";
+import { TopBar } from "@/components/ui/TopBar";
 import {
   Plan,
   api,
   cacheKeys,
-  getCached,
-  setCached,
+  syncAllCaches,
   useCached,
 } from "@/lib/api";
 import { getDeviceId } from "@/lib/deviceId";
@@ -58,6 +67,71 @@ function formatTargetLabel(iso: string): string {
   return `em ${diff} dias`;
 }
 
+function ArchiveToggle({
+  count,
+  open,
+  onToggle,
+}: {
+  count: number;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  const rot = useSharedValue(open ? 1 : 0);
+  useEffect(() => {
+    rot.value = withTiming(open ? 1 : 0, {
+      duration: 220,
+      easing: Easing.out(Easing.quad),
+    });
+  }, [open, rot]);
+  const caretStyle = useAnimatedStyle(() => ({
+    transform: [{ rotate: `${rot.value * 90}deg` }],
+  }));
+  return (
+    <Pressable
+      onPress={onToggle}
+      style={({ pressed }) => [
+        styles.archiveToggle,
+        pressed ? { opacity: 0.7 } : null,
+      ]}
+    >
+      <Animated.View style={caretStyle}>
+        <CaretRight size={14} color={palette.neutral[500]} weight="bold" />
+      </Animated.View>
+      <Text style={styles.archiveToggleText}>
+        Concluídos ({count})
+      </Text>
+    </Pressable>
+  );
+}
+
+function PlanIndicator({
+  completed,
+  total,
+  isComplete,
+}: {
+  completed: number;
+  total: number;
+  isComplete: boolean;
+}) {
+  return (
+    <View
+      style={[
+        styles.indicator,
+        isComplete ? styles.indicatorDone : null,
+      ]}
+    >
+      {isComplete ? (
+        <Check size={16} color={palette.white} weight="bold" />
+      ) : (
+        <Text style={styles.indicatorText}>
+          {completed}
+          <Text style={styles.indicatorTextDim}>/{total}</Text>
+        </Text>
+      )}
+    </View>
+  );
+}
+
 export default function PlansHomeScreen() {
   const router = useRouter();
   const [deviceId, setDeviceId] = useState<string | null>(null);
@@ -78,17 +152,19 @@ export default function PlansHomeScreen() {
   const [renamePlan, setRenamePlan] = useState<Plan | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [renaming, setRenaming] = useState(false);
+  // Archived plans live behind a collapsed accordion so completed work is
+  // visually quiet by default. Default collapsed: the home should always lead
+  // with what still needs training.
+  const [archiveOpen, setArchiveOpen] = useState(false);
 
   const load = useCallback(async () => {
     if (!deviceId) return;
     setError(null);
     try {
-      const list = await api.getPlans(deviceId);
-      setCached(cacheKeys.plans(deviceId), list, { persist: true });
-      // Pre-warm detail caches so tapping a card never shows a spinner.
-      for (const p of list) {
-        setCached(cacheKeys.plan(p.id), p, { persist: true });
-      }
+      // Full resync: plans list + each plan detail + profile + session
+      // invalidation. Keeps every cached view aligned with the server even
+      // after external DB resets. See `syncAllCaches` in lib/api.ts.
+      await syncAllCaches(deviceId);
     } catch (e) {
       setError((e as Error).message);
     }
@@ -190,19 +266,10 @@ export default function PlansHomeScreen() {
     );
   }, [actionPlan]);
 
-  if (loading) {
-    return (
-      <SafeAreaView style={styles.safe}>
-        <Animated.View entering={FadeIn.duration(220)} style={styles.center}>
-          <LogoMark size="lg" />
-        </Animated.View>
-      </SafeAreaView>
-    );
-  }
-
   if (error && !plans) {
     return (
-      <SafeAreaView style={styles.safe}>
+      <SafeAreaView style={styles.safe} edges={["top", "left", "right"]}>
+        <TopBar title="Planos" />
         <View style={styles.center}>
           <Text style={styles.errorText}>{error}</Text>
           <DuoButton title="TENTAR DE NOVO" onPress={load} fullWidth={false} />
@@ -211,114 +278,195 @@ export default function PlansHomeScreen() {
     );
   }
 
+  if (loading) {
+    return (
+      <SafeAreaView style={styles.safe} edges={["top", "left", "right"]}>
+        <TopBar title="Planos" />
+        <Animated.View entering={FadeIn.duration(220)} style={styles.center}>
+          <LogoMark size="lg" />
+        </Animated.View>
+      </SafeAreaView>
+    );
+  }
+
   const list = plans ?? [];
+  // A plan is "archived" once every day is done. Empty-day plans count as
+  // active (they're brand new and the user hasn't even seen the rail yet).
+  const isArchivedPlan = (p: Plan) =>
+    p.days.length > 0 && p.days.every((d) => d.completed_at);
+  const activePlans = list.filter((p) => !isArchivedPlan(p));
+  const archivedPlans = list.filter(isArchivedPlan);
+
+  const renderPlanCard = (p: Plan, i: number, variant: "active" | "archived") => {
+    const completed = p.days.filter((d) => d.completed_at).length;
+    const total = p.days.length;
+    const isComplete = total > 0 && completed === total;
+    const isBusy = busyId === p.id;
+    const archived = variant === "archived";
+    return (
+      <Animated.View
+        key={p.id}
+        entering={FadeInDown.duration(220).delay(i * 40)}
+      >
+        <PressableScale
+          onPress={() => {
+            Haptics.selectionAsync().catch(() => {});
+            enterPlan(p.id);
+          }}
+          onLongPress={() => {
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(
+              () => {},
+            );
+            openActions(p);
+          }}
+          delayLongPress={350}
+          disabled={isBusy}
+          style={({ pressed }) => [
+            styles.card,
+            archived ? styles.cardArchived : null,
+            pressed ? styles.cardPressed : null,
+            isBusy ? { opacity: 0.4 } : null,
+          ]}
+        >
+          <PlanIndicator
+            completed={completed}
+            total={total}
+            isComplete={isComplete}
+          />
+
+          <View style={styles.cardContent}>
+            <Text
+              style={[
+                styles.cardEyebrow,
+                archived ? styles.cardEyebrowArchived : null,
+              ]}
+            >
+              {archived ? "Concluído" : formatTargetLabel(p.target_date)}
+            </Text>
+            <Text
+              style={[
+                styles.cardTitle,
+                archived ? styles.cardTitleArchived : null,
+              ]}
+              numberOfLines={2}
+            >
+              {p.prep_for}
+            </Text>
+          </View>
+
+          {isBusy ? (
+            <ActivityIndicator
+              color={palette.neutral[400]}
+              size="small"
+              style={styles.trailingIcon}
+            />
+          ) : (
+            <CaretRight
+              size={20}
+              color={archived ? palette.neutral[300] : palette.neutral[400]}
+              weight="bold"
+              style={styles.trailingIcon}
+            />
+          )}
+        </PressableScale>
+      </Animated.View>
+    );
+  };
+
+  const subtitle =
+    activePlans.length > 0
+      ? `${activePlans.length} ${activePlans.length === 1 ? "plano" : "planos"} a treinar`
+      : list.length > 0
+        ? "Concluíste tudo. Cria um novo plano."
+        : "Cria o teu primeiro plano de treino.";
 
   return (
     <>
       <Screen
         scroll
         onRefresh={load}
+        header={<TopBar title="Planos" subtitle={subtitle} />}
+        reserveBottomNav
         contentStyle={{
-          paddingTop: spacing.lg,
-          paddingBottom: spacing.huge,
+          paddingTop: spacing.md,
         }}
       >
-        <View style={styles.hero}>
-          <Text style={styles.heroTitle}>Planos</Text>
-          <Text style={styles.heroSubtitle}>
-            {list.length > 0
-              ? `${list.length} ${list.length === 1 ? "plano" : "planos"} a treinar`
-              : "Cria o teu primeiro plano de treino."}
-          </Text>
-        </View>
-
-        {list.length === 0 ? (
-          <View style={styles.empty}>
-            <Text style={styles.emptyEyebrow}>Nada ainda</Text>
-            <Text style={styles.emptyTitle}>Começa um plano</Text>
-            <Text style={styles.emptyBody}>
-              Diz-nos para que te queres preparar e a IA monta-te um plano diário.
-            </Text>
+        {activePlans.length === 0 ? (
+          <View style={styles.emptyWrap}>
+            <View style={styles.empty}>
+              <Text style={styles.emptyTitle}>
+                {list.length === 0 ? "Começa um plano" : "Tudo concluído"}
+              </Text>
+              <Text style={styles.emptyBody}>
+                {list.length === 0
+                  ? "Diz-nos para que te queres preparar e a IA monta-te um plano diário."
+                  : "Cria um novo plano para continuar a treinar."}
+              </Text>
+              <View style={styles.emptyCta}>
+                <DuoButton
+                  title="NOVO PLANO"
+                  onPress={() => router.push("/onboarding")}
+                />
+              </View>
+            </View>
+            {archivedPlans.length > 0 ? (
+              <View style={styles.archiveSection}>
+                <ArchiveToggle
+                  count={archivedPlans.length}
+                  open={archiveOpen}
+                  onToggle={() => {
+                    Haptics.selectionAsync().catch(() => {});
+                    setArchiveOpen((v) => !v);
+                  }}
+                />
+                {archiveOpen ? (
+                  <Animated.View
+                    entering={FadeIn.duration(220)}
+                    style={styles.archiveList}
+                  >
+                    {archivedPlans.map((p, i) =>
+                      renderPlanCard(p, i, "archived"),
+                    )}
+                  </Animated.View>
+                ) : null}
+              </View>
+            ) : null}
           </View>
         ) : (
-          <View style={styles.list}>
-            {list.map((p, i) => {
-              const completed = p.days.filter((d) => d.completed_at).length;
-              const total = p.days.length;
-              const isComplete = total > 0 && completed === total;
-              const isBusy = busyId === p.id;
-              return (
-                <Animated.View
-                  key={p.id}
-                  entering={FadeInDown.duration(220).delay(i * 40)}
-                >
-                  <Pressable
-                    onPress={() => enterPlan(p.id)}
-                    onLongPress={() => openActions(p)}
-                    delayLongPress={350}
-                    disabled={isBusy}
-                    style={({ pressed }) => [
-                      styles.card,
-                      pressed ? styles.cardPressed : null,
-                      isBusy ? { opacity: 0.4 } : null,
-                    ]}
+          <>
+            <View style={styles.list}>
+              {activePlans.map((p, i) => renderPlanCard(p, i, "active"))}
+            </View>
+            <View style={styles.ctaWrap}>
+              <DuoButton
+                title="NOVO PLANO"
+                onPress={() => router.push("/onboarding")}
+              />
+            </View>
+            {archivedPlans.length > 0 ? (
+              <View style={styles.archiveSection}>
+                <ArchiveToggle
+                  count={archivedPlans.length}
+                  open={archiveOpen}
+                  onToggle={() => {
+                    Haptics.selectionAsync().catch(() => {});
+                    setArchiveOpen((v) => !v);
+                  }}
+                />
+                {archiveOpen ? (
+                  <Animated.View
+                    entering={FadeIn.duration(220)}
+                    style={styles.archiveList}
                   >
-                    <View
-                      style={[
-                        styles.indicator,
-                        isComplete ? styles.indicatorDone : null,
-                      ]}
-                    >
-                      {isComplete ? (
-                        <Check
-                          size={16}
-                          color={palette.white}
-                          weight="bold"
-                        />
-                      ) : (
-                        <Text style={styles.indicatorText}>
-                          {completed}
-                          <Text style={styles.indicatorTextDim}>/{total}</Text>
-                        </Text>
-                      )}
-                    </View>
-
-                    <View style={styles.cardContent}>
-                      <Text style={styles.cardEyebrow}>
-                        {formatTargetLabel(p.target_date)}
-                      </Text>
-                      <Text style={styles.cardTitle} numberOfLines={2}>
-                        {p.prep_for}
-                      </Text>
-                    </View>
-
-                    {isBusy ? (
-                      <ActivityIndicator
-                        color={palette.neutral[400]}
-                        size="small"
-                        style={styles.trailingIcon}
-                      />
-                    ) : (
-                      <CaretRight
-                        size={20}
-                        color={palette.neutral[400]}
-                        weight="bold"
-                        style={styles.trailingIcon}
-                      />
+                    {archivedPlans.map((p, i) =>
+                      renderPlanCard(p, i, "archived"),
                     )}
-                  </Pressable>
-                </Animated.View>
-              );
-            })}
-          </View>
+                  </Animated.View>
+                ) : null}
+              </View>
+            ) : null}
+          </>
         )}
-
-        <View style={styles.ctaWrap}>
-          <DuoButton
-            title="NOVO PLANO"
-            onPress={() => router.push("/onboarding")}
-          />
-        </View>
       </Screen>
 
       <Modal
@@ -445,41 +593,30 @@ const styles = StyleSheet.create({
     padding: spacing.xl,
   },
   errorText: { ...t.body, color: colors.danger, textAlign: "center" },
-  hero: {
-    paddingBottom: spacing.xxl,
-  },
-  heroTitle: {
-    fontFamily: fonts.extrabold,
-    fontSize: 28,
-    lineHeight: 34,
-    color: colors.text,
-  },
-  heroSubtitle: {
-    fontFamily: fonts.semibold,
-    fontSize: 14,
-    lineHeight: 20,
-    color: palette.neutral[500],
-    marginTop: spacing.xs,
+  emptyWrap: {
+    flexGrow: 1,
+    justifyContent: "center",
   },
   empty: {
-    paddingTop: spacing.huge,
     alignItems: "center",
     gap: spacing.sm,
-  },
-  emptyEyebrow: {
-    ...t.eyebrow,
+    paddingHorizontal: spacing.lg,
   },
   emptyTitle: {
     fontFamily: fonts.black,
-    fontSize: 26,
-    lineHeight: 32,
+    fontSize: 32,
+    lineHeight: 38,
     color: colors.text,
-    marginTop: spacing.xs,
+    textAlign: "center",
   },
   emptyBody: {
     ...t.bodyMuted,
     textAlign: "center",
     maxWidth: 280,
+  },
+  emptyCta: {
+    marginTop: spacing.xl,
+    alignSelf: "stretch",
   },
   list: {
     gap: spacing.md,
@@ -541,6 +678,35 @@ const styles = StyleSheet.create({
   },
   ctaWrap: {
     paddingTop: spacing.huge,
+  },
+  cardArchived: {
+    backgroundColor: palette.neutral[50],
+    borderColor: palette.neutral[100],
+  },
+  cardEyebrowArchived: {
+    color: palette.neutral[400],
+  },
+  cardTitleArchived: {
+    color: palette.neutral[500],
+  },
+  archiveSection: {
+    marginTop: spacing.xl,
+  },
+  archiveToggle: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+    paddingVertical: spacing.sm,
+    alignSelf: "flex-start",
+  },
+  archiveToggleText: {
+    fontFamily: fonts.bold,
+    fontSize: 13,
+    color: palette.neutral[500],
+  },
+  archiveList: {
+    gap: spacing.sm,
+    marginTop: spacing.md,
   },
   backdrop: {
     flex: 1,

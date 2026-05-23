@@ -1,4 +1,5 @@
 import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
+import * as Haptics from "expo-haptics";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import {
   ArrowCircleRightIcon as ArrowCircleRight,
@@ -10,7 +11,7 @@ import {
   PlayIcon as Play,
   XIcon as X,
 } from "phosphor-react-native";
-import { ReactNode, useEffect, useMemo, useState } from "react";
+import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import {
   NativeScrollEvent,
   NativeSyntheticEvent,
@@ -21,11 +22,14 @@ import {
   View,
 } from "react-native";
 import Animated, {
+  Easing,
   FadeIn,
   FadeInDown,
   useAnimatedStyle,
   useSharedValue,
+  withDelay,
   withRepeat,
+  withSequence,
   withTiming,
 } from "react-native-reanimated";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -33,6 +37,15 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { DuoButton } from "@/components/ui/DuoButton";
 import { LogoMark } from "@/components/ui/LogoMark";
 import { Screen } from "@/components/ui/Screen";
+import {
+  flushPendingAchievements,
+  setAchievementsResultScreenActive,
+} from "@/lib/achievementsQueue";
+import { flushPendingPlanCompleted } from "@/lib/planCompletionQueue";
+import {
+  flushPendingStreakUnlock,
+  setStreakResultScreenActive,
+} from "@/lib/streakCelebration";
 import {
   FillerHit,
   SessionResult,
@@ -122,6 +135,32 @@ export default function SessionResultScreen() {
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [pageIndex, setPageIndex] = useState(0);
   const [done, setDone] = useState(false);
+
+  // All three celebration queues use the same "pending until result
+  // unmounts" pattern: achievements + plan-completion + streak-activation
+  // sit in a pending buffer during the post-record flow and only surface
+  // once result.tsx unmounts. That keeps the cards from painting over the
+  // CelebrationFlow or the rating reveal — they always appear over /plans.
+  //
+  // For achievements + streak, the gate is actually CLOSED earlier — by
+  // submitSession itself, synchronously, before its background profile-
+  // refresh IIFE starts. We mirror that here on mount so revisits of a past
+  // result page (where submitSession never ran) also suppress any enqueue
+  // that might happen mid-view. On unmount we open the gate, which
+  // auto-promotes pending → live queue; the explicit flush calls below are
+  // therefore redundant for streak/achievements but cheap and kept for
+  // readability + to flush plan completion (which has no gate).
+  useEffect(() => {
+    setAchievementsResultScreenActive(true);
+    setStreakResultScreenActive(true);
+    return () => {
+      setAchievementsResultScreenActive(false);
+      setStreakResultScreenActive(false);
+      flushPendingAchievements();
+      flushPendingPlanCompleted();
+      flushPendingStreakUnlock();
+    };
+  }, []);
 
   useEffect(() => {
     if (inlineData || !dayId) return;
@@ -271,15 +310,15 @@ export default function SessionResultScreen() {
         </View>
         <Hairline />
 
-        <NumberedBlock title="PONTOS FORTES" items={feedback.strengths} />
-        <NumberedBlock title="A MELHORAR" items={feedback.weaknesses} />
-        <NumberedBlock title="PARA O PRÓXIMO TREINO" items={feedback.suggestions} />
+        <NumberedBlock title="Pontos fortes" items={feedback.strengths} />
+        <NumberedBlock title="A melhorar" items={feedback.weaknesses} />
+        <NumberedBlock title="Próximo treino" items={feedback.suggestions} />
 
-        <Block title="AVALIAÇÃO">
+        <Block title="Avaliação">
           <View style={styles.judgeList}>
-            <JudgeRow label="ADEQUAÇÃO À AUDIÊNCIA" text={feedback.audience_fit} />
-            <JudgeRow label="CONCISÃO" text={feedback.conciseness} />
-            <JudgeRow label="FOCO" text={feedback.dispersion} />
+            <JudgeRow label="Adequação à audiência" text={feedback.audience_fit} />
+            <JudgeRow label="Concisão" text={feedback.conciseness} />
+            <JudgeRow label="Foco" text={feedback.dispersion} />
           </View>
         </Block>
         <Hairline />
@@ -451,28 +490,12 @@ function FirstVisitPager({
         style={styles.pageBody}
       >
         {pageIndex === 0 ? (
-          <View style={styles.pg1_root}>
-            <View style={{ flex: 1 }} />
-            <View style={styles.pg1_ringWrap}>
-              <View
-                style={[styles.pg1_ring, { borderColor: ratingBand.color }]}
-              >
-                <View style={styles.pg1_ringInner}>
-                  <Text
-                    style={[styles.pg1_value, { color: ratingBand.color }]}
-                  >
-                    {data.rating}
-                  </Text>
-                  <Text style={styles.pg1_max}>/10</Text>
-                </View>
-              </View>
-              <Text style={[styles.pg1_label, { color: ratingBand.color }]}>
-                {ratingBand.label}
-              </Text>
-            </View>
-            <View style={{ flex: 1 }} />
-            <Text style={styles.pg1_motivation}>{motivation}</Text>
-          </View>
+          <ScoreReveal
+            rating={data.rating}
+            bandColor={ratingBand.color}
+            bandLabel={ratingBand.label}
+            motivation={motivation}
+          />
         ) : null}
 
         {pageIndex === 1 ? (
@@ -670,6 +693,207 @@ function ListPage({
     </View>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Score reveal: ring scales in, the rating counts up 0 → N over ~900ms with
+// tick haptics for game-show feel. On high ratings (≥ 8) a confetti burst
+// punctuates the moment.
+// ---------------------------------------------------------------------------
+
+function ScoreReveal({
+  rating,
+  bandColor,
+  bandLabel,
+  motivation,
+}: {
+  rating: number;
+  bandColor: string;
+  bandLabel: string;
+  motivation: string;
+}) {
+  const ringScale = useSharedValue(0.6);
+  const ringOpacity = useSharedValue(0);
+  const [display, setDisplay] = useState(0);
+
+  // Refs keep the count-up running exactly once even if the component re-mounts.
+  const ranRef = useRef(false);
+  const celebrate = rating >= 8;
+
+  useEffect(() => {
+    // Ring entrance — spring-ish via timing with overshoot is jarring on text.
+    // A simple ease-out scale + fade reads as "settling in" without bounce.
+    ringScale.value = withTiming(1, {
+      duration: 460,
+      easing: Easing.out(Easing.cubic),
+    });
+    ringOpacity.value = withTiming(1, { duration: 320 });
+
+    if (ranRef.current) return;
+    ranRef.current = true;
+
+    const duration = 900;
+    const start = Date.now() + 220; // hold on 0 briefly before counting
+    let lastTick = -1;
+    let frame: ReturnType<typeof setTimeout> | null = null;
+    const step = () => {
+      const t = Math.min(1, Math.max(0, (Date.now() - start) / duration));
+      const eased = 1 - Math.pow(1 - t, 3);
+      const v = Math.round(eased * rating);
+      if (v !== lastTick) {
+        lastTick = v;
+        setDisplay(v);
+        if (v > 0 && v < rating) {
+          // Light tactile tick on each integer the counter passes through.
+          Haptics.selectionAsync().catch(() => {});
+        }
+      }
+      if (t < 1) {
+        frame = setTimeout(step, 32);
+      } else {
+        setDisplay(rating);
+        // Land with a stronger haptic to punctuate the reveal.
+        Haptics.notificationAsync(
+          celebrate
+            ? Haptics.NotificationFeedbackType.Success
+            : Haptics.NotificationFeedbackType.Warning,
+        ).catch(() => {});
+      }
+    };
+    const startTimer = setTimeout(step, 0);
+    return () => {
+      clearTimeout(startTimer);
+      if (frame) clearTimeout(frame);
+    };
+    // ringScale / ringOpacity are stable shared values.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rating, celebrate]);
+
+  const ringStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: ringScale.value }],
+    opacity: ringOpacity.value,
+  }));
+
+  return (
+    <View style={styles.pg1_root}>
+      <View style={{ flex: 1 }} />
+      <Animated.View style={[styles.pg1_ringWrap, ringStyle]}>
+        <View style={[styles.pg1_ring, { borderColor: bandColor }]}>
+          <View style={styles.pg1_ringInner}>
+            <Text style={[styles.pg1_value, { color: bandColor }]}>
+              {display}
+            </Text>
+            <Text style={styles.pg1_max}>/10</Text>
+          </View>
+        </View>
+        <Text style={[styles.pg1_label, { color: bandColor }]}>{bandLabel}</Text>
+      </Animated.View>
+      <View style={{ flex: 1 }} />
+      <Text style={styles.pg1_motivation}>{motivation}</Text>
+      {celebrate ? <ConfettiBurst color={bandColor} /> : null}
+    </View>
+  );
+}
+
+// Lightweight confetti — 18 absolutely-positioned dots launched from screen
+// center with a small angular spread, each with its own randomized horizontal
+// drift and gravity-style fall. Pure View animation, no extra deps.
+
+const CONFETTI_COUNT = 22;
+
+function ConfettiBurst({ color }: { color: string }) {
+  return (
+    <View style={confettiStyles.layer} pointerEvents="none">
+      {Array.from({ length: CONFETTI_COUNT }).map((_, i) => (
+        <ConfettiDot key={i} index={i} color={color} />
+      ))}
+    </View>
+  );
+}
+
+function ConfettiDot({ index, color }: { index: number; color: string }) {
+  const tx = useSharedValue(0);
+  const ty = useSharedValue(0);
+  const rot = useSharedValue(0);
+  const op = useSharedValue(0);
+
+  // Per-dot random seed — recomputed only once per mount to avoid identical
+  // dots stacking and to keep each burst visually unique.
+  const seed = useMemo(() => {
+    // Spread across a 140° fan above center; horizontal drift biased by side.
+    const angle = -Math.PI / 2 + (Math.random() - 0.5) * (Math.PI * 0.78);
+    const speed = 160 + Math.random() * 180;
+    return {
+      dx: Math.cos(angle) * speed,
+      dyUp: Math.sin(angle) * speed,
+      dyDown: 360 + Math.random() * 120,
+      rot: (Math.random() * 720 - 360) * 1,
+      delay: index * 18,
+      size: 6 + Math.random() * 4,
+      // Mix of primary blue and white-on-blue for variety without breaking the
+      // strict palette.
+      tint: Math.random() < 0.55 ? color : palette.primary[300],
+    };
+  }, [index, color]);
+
+  useEffect(() => {
+    op.value = withDelay(
+      seed.delay,
+      withSequence(
+        withTiming(1, { duration: 80 }),
+        withTiming(1, { duration: 700 }),
+        withTiming(0, { duration: 320 }),
+      ),
+    );
+    // Up phase: shoot outward, then gravity pulls them down past the ring.
+    tx.value = withDelay(
+      seed.delay,
+      withTiming(seed.dx, { duration: 1100, easing: Easing.out(Easing.quad) }),
+    );
+    ty.value = withDelay(
+      seed.delay,
+      withSequence(
+        withTiming(seed.dyUp, { duration: 380, easing: Easing.out(Easing.quad) }),
+        withTiming(seed.dyDown, { duration: 760, easing: Easing.in(Easing.quad) }),
+      ),
+    );
+    rot.value = withDelay(
+      seed.delay,
+      withTiming(seed.rot, { duration: 1100, easing: Easing.out(Easing.cubic) }),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const style = useAnimatedStyle(() => ({
+    transform: [
+      { translateX: tx.value },
+      { translateY: ty.value },
+      { rotate: `${rot.value}deg` },
+    ],
+    opacity: op.value,
+  }));
+
+  return (
+    <Animated.View
+      style={[
+        confettiStyles.dot,
+        { width: seed.size, height: seed.size * 1.6, backgroundColor: seed.tint },
+        style,
+      ]}
+    />
+  );
+}
+
+const confettiStyles = StyleSheet.create({
+  layer: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  dot: {
+    position: "absolute",
+    borderRadius: 2,
+  },
+});
 
 function AudioPlayer({
   uri,
@@ -907,7 +1131,7 @@ const styles = StyleSheet.create({
     fontFamily: fonts.bold,
     fontSize: 13,
     lineHeight: 18,
-    color: palette.primary[700],
+    color: palette.primary[600],
   },
   judgeText: {
     fontFamily: fonts.regular,
@@ -1124,9 +1348,8 @@ const styles = StyleSheet.create({
     borderRadius: radii.pill,
   },
   pg3_chipText: {
-    fontFamily: fonts.extrabold,
+    fontFamily: fonts.bold,
     fontSize: 12,
-    letterSpacing: 0.4,
   },
   pg3_divider: {
     height: 1,

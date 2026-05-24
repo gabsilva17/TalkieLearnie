@@ -130,7 +130,7 @@ export default function PlanDetailScreen() {
       <Animated.View entering={FadeIn.duration(240)} style={styles.prep}>
         <Text style={styles.prepEyebrow}>A preparar</Text>
         <Text style={styles.prepText} numberOfLines={4}>
-          {plan.prep_for}
+          {plan.name ?? plan.prep_for}
         </Text>
       </Animated.View>
 

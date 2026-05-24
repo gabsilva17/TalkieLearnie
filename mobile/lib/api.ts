@@ -21,11 +21,19 @@ export type PlanDay = {
   completed_at: string | null;
 };
 
+export type FocusMode = "communication" | "technical" | "both";
+
 export type Plan = {
   id: string;
   prep_for: string;
+  // Short AI-generated display title shown on the plans list card. Falls
+  // back to prep_for when null (legacy rows created before this column).
+  name: string | null;
   target_date: string;
   audience_info: string;
+  extra_text: string | null;
+  extra_pdf_url: string | null;
+  focus_mode: FocusMode | null;
   created_at: string;
   days: PlanDay[];
 };
@@ -134,11 +142,60 @@ export const api = {
     prep_for: string;
     target_date: string;
     audience_info: string;
+    extra_text?: string | null;
+    focus_mode?: FocusMode | null;
+    pdf_uri?: string | null;
+    pdf_name?: string | null;
   }): Promise<Plan> {
+    // Always multipart — the backend accepts the file as optional. We use
+    // FileSystem.uploadAsync (legacy) for the same reason POST /sessions does:
+    // fetch + FormData is flaky on Android + New Architecture, and we already
+    // depend on this path elsewhere. When there's no PDF we fall back to a
+    // plain fetch with FormData containing only the text fields (uploadAsync
+    // requires a file URI).
+    const fields: Record<string, string> = {
+      device_id: input.device_id,
+      prep_for: input.prep_for,
+      target_date: input.target_date,
+      audience_info: input.audience_info,
+    };
+    if (input.extra_text) fields.extra_text = input.extra_text;
+    if (input.focus_mode) fields.focus_mode = input.focus_mode;
+
+    if (input.pdf_uri) {
+      const result = await FileSystem.uploadAsync(`${API_URL}/plans`, input.pdf_uri, {
+        httpMethod: "POST",
+        uploadType: FileSystem.FileSystemUploadType.MULTIPART,
+        fieldName: "pdf",
+        mimeType: "application/pdf",
+        // Some Android pickers hand us a content:// uri whose name we'd
+        // otherwise lose; pass the original filename so the backend's
+        // content-type sniff still recognises it as a PDF.
+        ...(input.pdf_name ? { httpHeaders: {} } : {}),
+        parameters: fields,
+      });
+      if (result.status >= 400) {
+        let detail = `HTTP ${result.status}`;
+        try {
+          const body = JSON.parse(result.body);
+          if (body?.detail)
+            detail =
+              typeof body.detail === "string"
+                ? body.detail
+                : JSON.stringify(body.detail);
+        } catch {
+          if (result.body) detail = result.body.slice(0, 300);
+        }
+        throw new Error(detail);
+      }
+      return JSON.parse(result.body) as Plan;
+    }
+
+    const form = new FormData();
+    for (const [k, v] of Object.entries(fields)) form.append(k, v);
     const res = await fetch(`${API_URL}/plans`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(input),
+      body: form as unknown as BodyInit,
     });
     return (await jsonOrThrow(res)) as Plan;
   },
@@ -193,14 +250,14 @@ export const api = {
   async renamePlan(
     plan_id: string,
     device_id: string,
-    prep_for: string,
+    name: string,
   ): Promise<Plan> {
     const res = await fetch(
       `${API_URL}/plans/${encodeURIComponent(plan_id)}`,
       {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ device_id, prep_for }),
+        body: JSON.stringify({ device_id, name }),
       },
     );
     return (await jsonOrThrow(res)) as Plan;
@@ -399,7 +456,12 @@ export const api = {
       } catch {
         if (result.body) detail = result.body.slice(0, 300);
       }
-      throw new Error(detail);
+      const err = new Error(detail) as Error & { tooShort?: boolean };
+      // 422 = backend rejected the recording before scoring (too short or
+      // empty transcript). Mobile shows a dedicated "REPETIR" screen instead
+      // of the generic error toast.
+      if (result.status === 422) err.tooShort = true;
+      throw err;
     }
     const session = JSON.parse(result.body) as SessionResult;
 

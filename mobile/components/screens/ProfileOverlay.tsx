@@ -455,7 +455,7 @@ function StatsFlat({ profile }: { profile: Profile }) {
         <View style={styles.fillerInline}>
           <WarningCircle size={16} color={palette.neutral[500]} weight="bold" />
           <Text style={styles.fillerInlineText}>
-            Muleta mais comum:{" "}
+            Filler word mais comum:{" "}
             <Text style={styles.fillerStrong}>"{profile.top_filler}"</Text>
           </Text>
         </View>

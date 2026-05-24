@@ -19,6 +19,11 @@ router = APIRouter(prefix="/sessions", tags=["sessions"])
 AUDIO_DIR = Path(__file__).resolve().parents[2] / "data" / "audio"
 _AUDIO_NAME_RE = re.compile(r"^[A-Za-z0-9_\-]+\.[A-Za-z0-9]+$")
 
+# Minimum recording length we'll grade. Below this we have too little speech
+# for the pacing / filler / WPM metrics to mean anything, and Sonnet ends up
+# inventing feedback. Bounce the user back to re-record instead.
+MIN_SESSION_DURATION_S = 5.0
+
 
 def _audio_url(request: Request | None, filename: str | None) -> str | None:
     if not filename:
@@ -73,44 +78,49 @@ def create_session(
 
     existing = (
         sb.table("sessions")
-        .select("id")
+        .select("id, audio_filename")
         .eq("plan_day_id", str(plan_day_id))
         .limit(1)
         .execute()
     )
-    if existing.data:
-        raise HTTPException(status_code=409, detail="session already exists for this plan_day")
+    existing_row = existing.data[0] if existing.data else None
+    is_retry = existing_row is not None
 
-    # Snapshot the BEFORE state for celebration detection. Pull every existing
-    # session row for this device — these are what the next-state diff is
-    # measured against. Cheap (one query per table) and runs while the audio
-    # is being read; the upload latency dominates anyway.
-    plan_ids_q = sb.table("plans").select("id").eq("device_id", device_id).execute()
-    before_plan_ids = [p["id"] for p in (plan_ids_q.data or [])]
-    before_plans_count = len(before_plan_ids)
-    before_day_ids: list[str] = []
-    if before_plan_ids:
-        days_q = (
-            sb.table("plan_days")
-            .select("id")
-            .in_("plan_id", before_plan_ids)
-            .execute()
-        )
-        before_day_ids = [d["id"] for d in (days_q.data or [])]
+    # Snapshot the BEFORE state for celebration detection. Skip entirely on
+    # retries — celebrations fire only once per plan_day_id and were already
+    # delivered on the first session of the day. Pull every existing session
+    # row for this device — these are what the next-state diff is measured
+    # against. Cheap (one query per table) and runs while the audio is being
+    # read; the upload latency dominates anyway.
     before_sessions: list[dict] = []
-    if before_day_ids:
-        sess_q = (
-            sb.table("sessions")
-            .select(
-                "created_at, audio_duration_s, wpm, filler_count, top_filler, rating"
+    before_plans_count = 0
+    before_profile = None
+    if not is_retry:
+        plan_ids_q = sb.table("plans").select("id").eq("device_id", device_id).execute()
+        before_plan_ids = [p["id"] for p in (plan_ids_q.data or [])]
+        before_plans_count = len(before_plan_ids)
+        before_day_ids: list[str] = []
+        if before_plan_ids:
+            days_q = (
+                sb.table("plan_days")
+                .select("id")
+                .in_("plan_id", before_plan_ids)
+                .execute()
             )
-            .in_("plan_day_id", before_day_ids)
-            .execute()
+            before_day_ids = [d["id"] for d in (days_q.data or [])]
+        if before_day_ids:
+            sess_q = (
+                sb.table("sessions")
+                .select(
+                    "created_at, audio_duration_s, wpm, filler_count, top_filler, rating"
+                )
+                .in_("plan_day_id", before_day_ids)
+                .execute()
+            )
+            before_sessions = sess_q.data or []
+        before_profile = build_profile(
+            before_sessions, before_plans_count, tz_offset_minutes
         )
-        before_sessions = sess_q.data or []
-    before_profile = build_profile(
-        before_sessions, before_plans_count, tz_offset_minutes
-    )
 
     try:
         audio_bytes = audio.file.read()
@@ -129,6 +139,27 @@ def create_session(
     transcript = whisper.get("text", "").strip()
     duration_s = float(whisper.get("duration") or 0.0)
     words = whisper.get("words") or []
+
+    # Filter junk recordings (silence, accidental taps, 2-second tests) before
+    # we spend Sonnet tokens and write to the DB. Two distinct messages so the
+    # user knows what to fix on the retry.
+    if not transcript:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Não percebi nada do que disseste. Confirma que o microfone "
+                "está activo, fala para o microfone e tenta de novo."
+            ),
+        )
+    if duration_s < MIN_SESSION_DURATION_S:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "A tua gravação foi demasiado curta. Precisamos de pelo menos "
+                "5 segundos para te darmos um feedback útil. Responde com um "
+                "pouco mais de detalhe e tenta de novo."
+            ),
+        )
 
     metrics = compute_metrics(transcript, words, duration_s)
 
@@ -159,25 +190,44 @@ def create_session(
         print(f"warning: failed to persist audio file: {e}")
         audio_filename = None
 
-    sess_ins = (
-        sb.table("sessions")
-        .insert(
-            {
-                "plan_day_id": str(plan_day_id),
-                "audio_duration_s": duration_s,
-                "audio_filename": audio_filename,
-                "transcript": transcript,
-                "wpm": metrics["wpm"],
-                "filler_count": metrics["filler_count"],
-                "top_filler": metrics["top_filler"],
-                "filler_timestamps": metrics["filler_timestamps"],
-                "pacing_variation": metrics["pacing_variation"],
-                "rating": int(feedback["rating"]),
-                "feedback_json": feedback,
-            }
+    session_payload = {
+        "plan_day_id": str(plan_day_id),
+        "audio_duration_s": duration_s,
+        "audio_filename": audio_filename,
+        "transcript": transcript,
+        "wpm": metrics["wpm"],
+        "filler_count": metrics["filler_count"],
+        "top_filler": metrics["top_filler"],
+        "filler_timestamps": metrics["filler_timestamps"],
+        "pacing_variation": metrics["pacing_variation"],
+        "rating": int(feedback["rating"]),
+        "feedback_json": feedback,
+    }
+
+    if is_retry:
+        # Overwrite the existing row in place. completed_at on plan_days
+        # stays as-is — the day was already closed by the first session.
+        # Best-effort clean up the previous audio file to avoid orphans.
+        prev_audio = existing_row.get("audio_filename") if existing_row else None
+        if prev_audio and _AUDIO_NAME_RE.fullmatch(prev_audio):
+            try:
+                (AUDIO_DIR / prev_audio).unlink(missing_ok=True)
+            except Exception as e:
+                print(f"warning: failed to delete previous audio file: {e}")
+        upd = (
+            sb.table("sessions")
+            .update(session_payload)
+            .eq("id", existing_row["id"])
+            .execute()
         )
-        .execute()
-    )
+        if not upd.data:
+            raise HTTPException(status_code=500, detail="failed to update session")
+        # No celebration diff on retries — they all fired on the first
+        # session of the day. Returning None matches the GET /sessions
+        # contract for historical rows.
+        return _row_to_out(upd.data[0], request, celebrations=None)
+
+    sess_ins = sb.table("sessions").insert(session_payload).execute()
     new_session_row = sess_ins.data[0]
     sb.table("plan_days").update({"completed_at": "now()"}).eq("id", str(plan_day_id)).execute()
 

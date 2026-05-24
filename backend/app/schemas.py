@@ -4,16 +4,11 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 
-class CreatePlanReq(BaseModel):
-    device_id: str = Field(min_length=1)
-    prep_for: str = Field(min_length=1)
-    target_date: date
-    audience_info: str = Field(min_length=1)
-
-
 class RenamePlanReq(BaseModel):
     device_id: str = Field(min_length=1)
-    prep_for: str = Field(min_length=1, max_length=200)
+    # Edits the short display title (plans.name), not the original prep_for
+    # description (which stays as LLM context).
+    name: str = Field(min_length=1, max_length=200)
 
 
 class PlanDayOut(BaseModel):
@@ -28,8 +23,15 @@ class PlanDayOut(BaseModel):
 class PlanOut(BaseModel):
     id: UUID
     prep_for: str
+    # Short AI-generated display title (2-4 words) shown on the plan list card.
+    # NULL on legacy rows created before this column existed — mobile falls
+    # back to prep_for in that case.
+    name: str | None = None
     target_date: date
     audience_info: str
+    extra_text: str | None = None
+    extra_pdf_url: str | None = None
+    focus_mode: str | None = None
     created_at: datetime
     days: list[PlanDayOut]
 

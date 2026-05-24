@@ -2,7 +2,19 @@ from openai import OpenAI
 
 from ..config import get_settings
 
-PT_PT_FILLER_PROMPT = "Ah, hum, tipo, pronto, então, epá, sabes, basicamente, quer dizer, ou seja."
+# Whisper aggressively normalises hesitation sounds ("uh", "uhh", "hum", "ehm"
+# etc.) out of transcripts, which made the filler-detection metric look much
+# better than reality. The fix that actually works in practice (per OpenAI's
+# Whisper prompting guide + the openai/whisper#1174 disfluency thread): feed
+# a *long, natural-sounding* sample of pt-PT speech full of the disfluencies
+# we want preserved. Short keyword lists don't steer Whisper reliably; prose
+# does. Keep this under ~224 tokens (the prompt window) and pt-PT only.
+PT_PT_FILLER_PROMPT = (
+    "Hum... então, ah, eu acho que, tipo, é assim. Ehm, imagina, "
+    "imagina lá, sabes? Ahn, hummm, pronto, basicamente, no fundo, quer dizer. "
+    "Tipo, sei lá, eh, percebes? Ahh, ou seja, pois, olha, epá, hmm. "
+    "Tipo coisa, tás a ver, é tipo, ya, ahn, hum. Uhh, uhm, ehm, pronto."
+)
 
 
 def transcribe_pt(audio_bytes: bytes, filename: str, content_type: str) -> dict:

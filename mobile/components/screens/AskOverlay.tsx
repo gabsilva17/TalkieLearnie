@@ -280,10 +280,24 @@ export function AskOverlay({ onClose }: { onClose: () => void }) {
     setComposerMode("recording");
     try {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
-      await recorder.prepareToRecordAsync();
+      try {
+        await recorder.prepareToRecordAsync();
+      } catch {
+        // Recorder is stuck in a prepared state from a prior tap-and-release
+        // race (the next prepareToRecordAsync always rejects until we flush
+        // it). Try to recycle and retry once.
+        try { await recorder.stop(); } catch {}
+        await recorder.prepareToRecordAsync();
+      }
       if (!recordingIntentRef.current) {
-        // User released during prepare. Don't start a recording that no one
-        // is going to stop — that's how the next press ended up dead.
+        // User released during prepare. We MUST flush the prepared recorder,
+        // otherwise the next prepareToRecordAsync rejects with
+        // "AudioRecorder.prepareToRecordAsync has been rejected" and the mic
+        // is dead until the screen unmounts. record() + stop() recycles it.
+        try {
+          recorder.record();
+          await recorder.stop();
+        } catch {}
         setComposerMode("idle");
         return;
       }
@@ -300,6 +314,8 @@ export function AskOverlay({ onClose }: { onClose: () => void }) {
         });
       }, 1000);
     } catch (e) {
+      // Best-effort recovery so the user can try again without remounting.
+      try { await recorder.stop(); } catch {}
       recordingActiveRef.current = false;
       recordingIntentRef.current = false;
       setComposerMode("idle");

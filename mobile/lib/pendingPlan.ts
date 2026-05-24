@@ -1,4 +1,4 @@
-import { Plan, api } from "@/lib/api";
+import { FocusMode, Plan, api } from "@/lib/api";
 
 // In-memory store that powers the optimistic /plan/pending screen. The
 // onboarding form calls `start(input)` to kick off the real `POST /plans`
@@ -13,6 +13,13 @@ export type PendingInput = {
   target_date: string; // ISO yyyy-mm-dd
   audience_info: string;
   n_days: number; // computed on the client: min(7, daysUntil(target_date))
+  // Optional extra context from the final onboarding step. focus_mode only
+  // makes sense when at least one of extra_text / pdf_uri is set, but we
+  // don't enforce that here — the onboarding screen owns that invariant.
+  extra_text?: string | null;
+  pdf_uri?: string | null;
+  pdf_name?: string | null;
+  focus_mode?: FocusMode | null;
 };
 
 export type PendingState =
@@ -60,6 +67,10 @@ export function startPendingPlan(input: PendingInput): void {
       prep_for: input.prep_for,
       target_date: input.target_date,
       audience_info: input.audience_info,
+      extra_text: input.extra_text,
+      focus_mode: input.focus_mode,
+      pdf_uri: input.pdf_uri,
+      pdf_name: input.pdf_name,
     })
     .then((plan) => {
       if (state.status !== "loading" || state.input !== input) {

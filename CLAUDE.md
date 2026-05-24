@@ -48,30 +48,63 @@ mini-simulation per day → Whisper transcribe → deterministic metrics
 (WPM, fillers, pacing variation) → Sonnet 4.6 judge → result screen.
 
 Backend endpoints (`backend/app/routes/`):
-- `POST /plans` — Haiku generates 1–7 days of theme+question (pt-PT).
+- `POST /plans` — **multipart** endpoint (form fields + optional file). Required
+  fields: `device_id`, `prep_for`, `target_date`, `audience_info`. Optional:
+  `extra_text` (free-form context), `focus_mode` (`communication` | `technical`
+  | `both`), and a `pdf` file (max 32 MB, `application/pdf` only). Haiku 4.5
+  generates 1–7 days of theme+question **plus a short `plan_name`** (2-4
+  words, pt-PT) in a single tool call. The name is persisted on `plans.name`
+  and surfaced as `plan.name` on `PlanOut`; mobile uses it as the card title
+  in the plan list (falling back to `prep_for` when null on legacy rows).
+  `prep_for` itself is no longer the display name — it stays as the original
+  user description and continues to be passed to every downstream LLM call
+  (plan_gen, analyze, ask, motivation) as goal context. When a PDF is
+  provided it rides along as a base64 `document` content block in the
+  Anthropic call (the model uses it for grounded, specific questions).
+  `focus_mode` rewrites a paragraph of the user message to bias the plan
+  towards comm / tech / mixed training. PDFs are persisted to
+  `backend/data/extras/<uuid>.pdf` and surfaced as `plan.extra_pdf_url` on
+  `PlanOut`; `DELETE /plans/{id}` also best-effort unlinks the file.
+- `GET /plans/extras/{filename}` — streams a stored PDF. Filename is
+  validated against `^[A-Za-z0-9_\-]+\.pdf$` to prevent path traversal.
 - `GET /plans?device_id=…` — all plans for the device (newest first), each with
   their days. Used by the plans home screen.
 - `GET /plans/{plan_id}?device_id=…` — a specific plan with its days. 403 if
   the plan doesn't belong to `device_id`.
 - `DELETE /plans/{plan_id}?device_id=…` — deletes the plan; cascade removes
   its days and sessions. 403 on device mismatch.
-- `PATCH /plans/{plan_id}` — body `{device_id, prep_for}`; renames the plan's
-  `prep_for` field (the user-visible plan name). 403 on device mismatch.
-  Used by the long-press action sheet on the plans home screen.
+- `PATCH /plans/{plan_id}` — body `{device_id, name}`; updates the plan's
+  short display title (`plans.name`). The original `prep_for` description
+  stays put as LLM context. 403 on device mismatch. Used by the long-press
+  action sheet on the plans home screen.
 - `GET /plans/current?device_id=…` — latest plan for the device, or `null`.
   Kept for back-compat; new code should use `GET /plans` or `GET /plans/{id}`.
 - `POST /sessions` — multipart audio + form fields `device_id`, `plan_day_id`,
-  and `tz_offset_minutes`. Pipeline: Whisper → metrics (incl. filler
-  timestamps) → Sonnet 4.6 forced-tool analysis → audio persisted to
-  `backend/data/audio/<uuid>.m4a` → Supabase insert. Rejects with 403 if
-  `plan_day.day_date != date.today()` on the server (enforces the "today
-  only" rule, matches the mobile UI lock). Also computes the celebration
+  and `tz_offset_minutes`. Pipeline: Whisper → **junk filter (422 if empty
+  transcript or `duration_s < 5s`, see `MIN_SESSION_DURATION_S`)** → metrics
+  (incl. filler timestamps) → Sonnet 4.6 forced-tool analysis → audio
+  persisted to `backend/data/audio/<uuid>.m4a` → Supabase insert. The junk
+  filter runs right after Whisper so we never spend Sonnet tokens or write a
+  session row for a 2-second mistap or a silent take; the mobile screen
+  catches the 422 (via `Error.tooShort` on `submitSession`), parks the pt-PT
+  explanation in `tooShort` state, and renders `TooShortStep` (mic-slash
+  icon + "REPETIR" CTA that drops the user back at the question step).
+  Rejects with 403 if `plan_day.day_date != date.today()` on the server
+  (enforces the "today only" rule, matches the mobile UI lock). Also computes the celebration
   diff and returns it on `session.celebrations`:
   `newly_earned_achievements` (full `AchievementOut` objects),
   `streak_just_activated`/`streak_current`/`streak_best`/`streak_is_new_best`,
   and `plan_just_completed` + plan details when this session closed the
   last incomplete day. `tz_offset_minutes` is required for the streak diff
-  (the boundary is the user's local day).
+  (the boundary is the user's local day). **Retry support:** if a session
+  row already exists for `plan_day_id` (the user tapped "REPETIR PARA
+  MELHORAR" on the result screen), the endpoint UPDATES that row in place
+  instead of returning 409: best-effort delete the previous audio file,
+  write the new one, recompute everything (Whisper → metrics → Sonnet),
+  overwrite the row. `plan_days.completed_at` is left as-is. `celebrations`
+  is `null` on retries — every transition (achievements, streak, plan
+  completion) already fired on the first session of the day, so the diff
+  is intentionally skipped (no BEFORE-snapshot query either).
 - `GET /sessions?plan_day_id=…|device_id=…` — history. Each row includes
   `audio_url` (absolute, host-aware) and `filler_timestamps` so the result
   screen can replay audio and jump to each filler.
@@ -141,20 +174,35 @@ Mobile screen tree (`mobile/app/`):
   always see their full plan list on launch. `lastPlanId` is still written
   by other screens (used elsewhere for back-navigation), just not consulted
   at boot.
-- `onboarding.tsx` — 3-field form (prep_for, target_date, audience_info). On
-  submit, computes `n_days = min(7, daysUntilLocalMidnight(target_date))` on
+- `onboarding.tsx` — 4-step form (prep_for, target_date, audience_info, and
+  an optional **context step** that accepts free-text notes + a PDF
+  attachment + a focus toggle). On submit, computes
+  `n_days = min(7, daysUntilLocalMidnight(target_date))` on
   the client (mirroring the server cap), fires `startPendingPlan(...)` (which
   kicks off `POST /plans` in the background) and immediately
   `router.replace("/plan/pending")`. We do NOT await the network here — the
   pending screen owns the optimistic UI. `lastPlanId` is set later by
-  `/plan/[id]`'s focus effect, no longer here. The two text fields (`prep_for`
-  and `audience_info`) host a **hold-to-talk** mic icon anchored inside the
-  textarea (bottom-right). Same `onPressIn` / `onPressOut` pattern as the
-  Ask composer: hold to record, release to transcribe via `POST /ask/transcribe`
-  and append to the field; <400ms presses are silent no-ops. The recording
-  pill morph overlays the entire input with a waveform, mm:ss timer, and a
-  non-interactive primary mic indicator in the same bottom-right slot the
-  user's finger is already on.
+  `/plan/[id]`'s focus effect, no longer here. The three text fields
+  (`prep_for`, `audience_info`, and the Step 4 extra-context textarea) host a
+  **hold-to-talk** mic icon anchored inside the textarea (bottom-right).
+  Same `onPressIn` / `onPressOut` pattern as the Ask composer: hold to
+  record, release to transcribe via `POST /ask/transcribe` and append to the
+  field; <400ms presses are silent no-ops. The recording pill morph overlays
+  the entire input with a waveform, mm:ss timer, and a non-interactive
+  primary mic indicator in the same bottom-right slot the user's finger is
+  already on.
+
+  **Step 4 (extra context)** is optional and always tappable through —
+  `canContinue` is true even when both inputs are empty so the user can skip
+  with one tap. The textarea takes free-form notes (briefing, FAQ, numbers).
+  The PDF picker uses `expo-document-picker.getDocumentAsync({ type:
+  "application/pdf", copyToCacheDirectory: true })`; size is capped at 32 MB
+  client-side (mirrors the backend cap). The **focus toggle** (Comunicação /
+  Domínio técnico / Ambos) only renders when there's text or a PDF
+  attached — its value is sent on the upload to bias Haiku toward general
+  communication training, deep-technical questions, or an alternation of
+  both. When the user skips entirely, `focus_mode` is sent as null and the
+  plan generator runs with the same prompt it always had.
 - `plan/pending.tsx` — optimistic plan-creation screen. Subscribes to
   `mobile/lib/pendingPlan.ts` (an in-memory store seeded by onboarding) and
   renders the same layout as `/plan/[id]` with N skeleton `DayCardSkeleton`s
@@ -320,13 +368,32 @@ Wiring lives in:
   longer guaranteed to live in the most-recent plan. Redirects back to the
   plan if the day's `day_date` isn't today (deep-link safety net for the
   "today only" rule). `localTodayISO()` lives in `mobile/lib/dayDate.ts`.
+  **Retry mode** (`?retry=1`, set by the result screen's "REPETIR PARA
+  MELHORAR" button): bypasses the `completed_at` → `/result` redirect so
+  the user can re-record an already-finished day, and fetches the previous
+  session via `api.getSessionForDay` to extract a focus tip
+  (`feedback.suggestions[0]` → fallback `weaknesses[0]`). The IntroStep
+  swaps its pill to "Nova tentativa" (ArrowClockwise icon), changes the
+  subtitle to "Aplica o feedback que recebeste e tenta de novo.", and
+  inserts a primary-50 "Foco desta tentativa" card with the tip text.
+  The day_date guard still applies (retries are today-only). Submission
+  goes through the same `submitSession` path — the backend detects the
+  existing row, UPSERTs in place, and returns `celebrations=null`, so the
+  achievement / streak / plan-completion queues stay empty on retries.
   After "TERMINADO" the screen renders **`CelebrationFlow`** instead of a
   loading bar: 4 cenas obrigatórias + 2 cenas condicionais (só com edição
-  da transcrição), todas encadeadas com crossfade lento. As 4 obrigatórias:
-  1 "Boa!" + confetti, 2 mini day-rail com o dia actual a transitar de
-  `current` para `done` com bounce + check, 3 frase motivacional do Haiku
-  via `POST /motivation` com pulsação até `pendingResult` chegar, 4
-  transcript editável + botão "VER FEEDBACK".
+  da transcrição), todas encadeadas com crossfade lento. **Pre-gate local:**
+  `stopAndUpload` rejeita gravações curtas (`elapsed < 5`) ANTES de fazer
+  upload e renderiza `TooShortStep` diretamente, por isso o "Boa!" nunca
+  aparece para o caso óbvio (utilizador toca em TERMINADO depois de 1-2
+  segundos). O 422 do backend continua a existir como safety net para o
+  caso raro de `elapsed >= 5` com transcrição vazia (5s de silêncio
+  ininteligível) - se isso acontecer, o parent troca `CelebrationFlow` por
+  `TooShortStep` a meio do "Boa!". As 4 cenas obrigatórias: 1 "Boa!" +
+  confetti, 2 mini day-rail com o dia actual a transitar de `current` para
+  `done` com bounce + check, 3 frase motivacional do Haiku via
+  `POST /motivation` com pulsação até `pendingResult` chegar, 4 transcript
+  editável + botão "VER FEEDBACK".
   O cartão da cena 4 é um **`TextInput` multiline editável** (não um `Text`
   read-only): o utilizador pode corrigir erros de transcrição do Whisper
   antes de ver o feedback. Quando o texto foi alterado (`text.trim() !==
@@ -359,8 +426,11 @@ Wiring lives in:
 - `session/[dayId]/result.tsx` — rating + metrics + pt-PT feedback, plus a
   replay block: `expo-audio` `useAudioPlayer` plays the stored answer, and
   tappable filler-word chips call `player.seekTo(start)` + `play()` to jump.
-  "Voltar ao plano" navigates to `/`, letting the boot router resume the last
-  visited plan.
+  Two-button footer on the landed view: "VOLTAR AO PLANO" (primary →
+  navigates to `/`, letting the boot router resume the last visited plan)
+  and "REPETIR PARA MELHORAR" (secondary → `router.replace('/session/[dayId]?retry=1')`
+  to re-enter the record flow with the prior feedback surfaced as a focus
+  tip; see retry mode notes on the session screen above).
 
 Achievement unlock celebration:
 - `mobile/lib/achievementsQueue.ts` — mirrors `planCompletionQueue.ts`:
@@ -524,7 +594,10 @@ Four tables: `plans`, `plan_days`, `sessions`, `pending_pushes`. If you
 already have older tables, run the `alter table … add column if not exists …`
 and `create table if not exists pending_pushes …` statements at the bottom of
 `schema.sql` (those also drop the obsolete `push_tokens` table from the
-earlier Expo Push API attempt).
+earlier Expo Push API attempt, add the `plans.extra_text`,
+`plans.extra_pdf_filename`, `plans.focus_mode` columns added for the
+optional onboarding context step, and the `plans.name` column for the
+AI-generated short display title shown on the plans list card).
 
 Mobile:
 ```bash

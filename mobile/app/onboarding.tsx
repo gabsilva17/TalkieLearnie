@@ -1,3 +1,4 @@
+import * as DocumentPicker from "expo-document-picker";
 import {
   AudioModule,
   RecordingPresets,
@@ -11,7 +12,9 @@ import {
   CalendarBlankIcon as CalendarBlank,
   CaretLeftIcon as CaretLeft,
   CaretRightIcon as CaretRight,
+  FilePdfIcon as FilePdf,
   MicrophoneIcon as Microphone,
+  PaperclipIcon as Paperclip,
   XIcon as X,
 } from "phosphor-react-native";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -27,6 +30,7 @@ import {
 import Animated, {
   Easing,
   FadeIn,
+  FadeOut,
   interpolateColor,
   useAnimatedStyle,
   useSharedValue,
@@ -35,7 +39,7 @@ import Animated, {
 
 import { DuoButton } from "@/components/ui/DuoButton";
 import { Screen } from "@/components/ui/Screen";
-import { api } from "@/lib/api";
+import { FocusMode, api } from "@/lib/api";
 import { getDeviceId } from "@/lib/deviceId";
 import { startPendingPlan } from "@/lib/pendingPlan";
 import { colors, fonts, palette, radii, spacing, type as t } from "@/lib/theme";
@@ -94,8 +98,11 @@ function isoDate(d: Date): string {
   return `${y}-${m}-${dd}`;
 }
 
-type Step = 0 | 1 | 2;
-const TOTAL = 3;
+type Step = 0 | 1 | 2 | 3;
+const TOTAL = 4;
+
+// Mirror the backend cap (FastAPI also enforces 32 MB).
+const MAX_PDF_BYTES = 32 * 1024 * 1024;
 
 // Voice dictation cap. Onboarding answers tend to be short; 2 min matches the
 // AskOverlay ceiling.
@@ -127,13 +134,17 @@ const PROMPTS: Record<Step, string> = {
   0: "Olá! Para que te queres preparar?",
   1: "Quando é o grande dia?",
   2: "E quem te vai estar a ouvir?",
+  3: "Tens material para partilhar?",
 };
 
 const SUBTITLES: Record<Step, string | null> = {
   0: "Pitch, entrevista, conversa difícil. Diz-nos em poucas palavras.",
   1: null,
   2: "Quanto mais souberes sobre eles, melhor preparamos o plano.",
+  3: "Adiciona um deck, briefing ou notas para um plano mais afinado. (opcional)",
 };
+
+type FieldKey = "prep" | "audience" | "extra";
 
 export default function Onboarding() {
   const router = useRouter();
@@ -141,9 +152,12 @@ export default function Onboarding() {
   const [prepFor, setPrepFor] = useState("");
   const [audience, setAudience] = useState("");
   const [targetDate, setTargetDate] = useState<Date>(tomorrow());
+  const [extraText, setExtraText] = useState("");
+  const [pdf, setPdf] = useState<{ uri: string; name: string; size: number } | null>(null);
+  const [focusMode, setFocusMode] = useState<FocusMode>("communication");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [focusedField, setFocusedField] = useState<"prep" | "audience" | null>(null);
+  const [focusedField, setFocusedField] = useState<FieldKey | null>(null);
 
   // Voice dictation state — mirrors the AskOverlay pattern: a mic inside each
   // text field. Hold-to-talk: press and hold to record, release to transcribe
@@ -151,7 +165,7 @@ export default function Onboarding() {
   // screen at a time so a single recorder + morph value is enough.
   const recorder = useAudioRecorder(RECORDING_OPTIONS);
   const recorderState = useAudioRecorderState(recorder, 100);
-  const [recordingField, setRecordingField] = useState<"prep" | "audience" | null>(null);
+  const [recordingField, setRecordingField] = useState<FieldKey | null>(null);
   const [voicePermission, setVoicePermission] = useState<boolean | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [transcribing, setTranscribing] = useState(false);
@@ -169,12 +183,15 @@ export default function Onboarding() {
 
   const trimmedPrep = prepFor.trim();
   const trimmedAud = audience.trim();
+  const trimmedExtra = extraText.trim();
+  const hasExtraContext = trimmedExtra.length > 0 || pdf !== null;
   const canContinue =
     !isRecording &&
     !transcribing &&
     ((step === 0 && trimmedPrep.length > 3) ||
       (step === 1 && targetDate.getTime() >= new Date().setHours(0, 0, 0, 0)) ||
-      (step === 2 && trimmedAud.length > 3));
+      (step === 2 && trimmedAud.length > 3) ||
+      step === 3);
 
   async function submit() {
     setError(null);
@@ -195,6 +212,10 @@ export default function Onboarding() {
         target_date: targetISO,
         audience_info: trimmedAud,
         n_days: nDays,
+        extra_text: hasExtraContext ? trimmedExtra || null : null,
+        pdf_uri: pdf ? pdf.uri : null,
+        pdf_name: pdf ? pdf.name : null,
+        focus_mode: hasExtraContext ? focusMode : null,
       });
       router.replace("/plan/pending");
     } catch (e) {
@@ -205,7 +226,7 @@ export default function Onboarding() {
 
   function next() {
     if (!canContinue) return;
-    if (step < 2) {
+    if (step < 3) {
       setStep(((step + 1) as Step));
     } else {
       submit();
@@ -219,6 +240,33 @@ export default function Onboarding() {
       return;
     }
     setStep(((step - 1) as Step));
+  }
+
+  async function pickPdf() {
+    setError(null);
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: "application/pdf",
+        copyToCacheDirectory: true,
+        multiple: false,
+      });
+      if (result.canceled) return;
+      const asset = result.assets[0];
+      const size = asset.size ?? 0;
+      if (size > MAX_PDF_BYTES) {
+        setError("O PDF é demasiado grande (máximo 32 MB).");
+        return;
+      }
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+      setPdf({ uri: asset.uri, name: asset.name, size });
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+
+  function removePdf() {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+    setPdf(null);
   }
 
   // Single focus driver — at any step only one field is rendered, so a single
@@ -266,7 +314,7 @@ export default function Onboarding() {
     return granted;
   }
 
-  async function startDictation(field: "prep" | "audience") {
+  async function startDictation(field: FieldKey) {
     if (isRecording || transcribing || recordingIntentRef.current) return;
     recordingIntentRef.current = true;
     recordingStartRef.current = Date.now();
@@ -287,10 +335,24 @@ export default function Onboarding() {
     setRecordingField(field);
     try {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
-      await recorder.prepareToRecordAsync();
+      try {
+        await recorder.prepareToRecordAsync();
+      } catch {
+        // Recorder is stuck in a prepared state from a prior tap-and-release
+        // race (the next prepareToRecordAsync always rejects until we flush
+        // it). Try to recycle and retry once.
+        try { await recorder.stop(); } catch {}
+        await recorder.prepareToRecordAsync();
+      }
       if (!recordingIntentRef.current) {
-        // User released during prepare. Don't start a recording that no one
-        // is going to stop — that's how the next press ended up dead.
+        // User released during prepare. We MUST flush the prepared recorder,
+        // otherwise the next prepareToRecordAsync rejects with
+        // "AudioRecorder.prepareToRecordAsync has been rejected" and the mic
+        // is dead until the screen unmounts. record() + stop() recycles it.
+        try {
+          recorder.record();
+          await recorder.stop();
+        } catch {}
         setRecordingField(null);
         return;
       }
@@ -307,6 +369,8 @@ export default function Onboarding() {
         });
       }, 1000);
     } catch (e) {
+      // Best-effort recovery so the user can try again without remounting.
+      try { await recorder.stop(); } catch {}
       recordingActiveRef.current = false;
       recordingIntentRef.current = false;
       setError((e as Error).message);
@@ -355,8 +419,12 @@ export default function Onboarding() {
         setPrepFor((prev) =>
           prev.trim().length > 0 ? `${prev.trim()} ${text}` : text,
         );
-      } else {
+      } else if (field === "audience") {
         setAudience((prev) =>
+          prev.trim().length > 0 ? `${prev.trim()} ${text}` : text,
+        );
+      } else {
+        setExtraText((prev) =>
           prev.trim().length > 0 ? `${prev.trim()} ${text}` : text,
         );
       }
@@ -441,18 +509,50 @@ export default function Onboarding() {
           </View>
         ) : null}
 
+        {step === 3 ? (
+          <View style={styles.fieldStep4}>
+            <VoiceField
+              value={extraText}
+              onChangeText={setExtraText}
+              placeholder="Ex.: notas do briefing, perguntas frequentes, números-chave..."
+              onFocus={() => setFocusedField("extra")}
+              onBlur={() => setFocusedField(null)}
+              animatedBorder={animatedBorder}
+              recording={recordingField === "extra"}
+              transcribing={transcribing}
+              meteringDb={recorderState.metering}
+              elapsed={elapsed}
+              onStartRecord={() => startDictation("extra")}
+              onStopRecord={stopDictation}
+              idleStyle={idleStyle}
+              recordingStyle={recordingStyle}
+            />
+
+            <PdfAttachment pdf={pdf} onPick={pickPdf} onRemove={removePdf} />
+
+            {hasExtraContext ? (
+              <Animated.View
+                entering={FadeIn.duration(220)}
+                exiting={FadeOut.duration(160)}
+              >
+                <FocusToggle value={focusMode} onChange={setFocusMode} />
+              </Animated.View>
+            ) : null}
+          </View>
+        ) : null}
+
         {error ? <Text style={styles.error}>{error}</Text> : null}
 
         <View style={styles.buttonWrap}>
           <DuoButton
-            title={step < 2 ? "CONTINUAR" : "GERAR O MEU PLANO"}
+            title={step < 3 ? "CONTINUAR" : "GERAR O MEU PLANO"}
             onPress={next}
             disabled={!canContinue}
             loading={submitting}
           />
         </View>
 
-        {step === 2 ? (
+        {step === 3 ? (
           <Text style={styles.hint}>A IA prepara as sessões em 10–20 segundos.</Text>
         ) : null}
       </View>
@@ -749,6 +849,126 @@ function WaveBar({ sv }: { sv: ReturnType<typeof useSharedValue<number>> }) {
   return <Animated.View style={[styles.waveBar, style]} />;
 }
 
+// ---------------------------------------------------------------------------
+// PDF attachment slot. Idle: tappable card with a paperclip icon prompting
+// the user to attach. Filled: muted card with the filename and an X to remove.
+// ---------------------------------------------------------------------------
+
+function formatBytes(n: number): string {
+  if (!n) return "";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function PdfAttachment({
+  pdf,
+  onPick,
+  onRemove,
+}: {
+  pdf: { uri: string; name: string; size: number } | null;
+  onPick: () => void;
+  onRemove: () => void;
+}) {
+  if (pdf) {
+    return (
+      <View style={styles.pdfAttached}>
+        <View style={styles.pdfIconWrap}>
+          <FilePdf size={20} color={palette.primary[600]} weight="fill" />
+        </View>
+        <View style={styles.pdfTextWrap}>
+          <Text style={styles.pdfName} numberOfLines={1}>
+            {pdf.name}
+          </Text>
+          {pdf.size ? (
+            <Text style={styles.pdfMeta}>{formatBytes(pdf.size)}</Text>
+          ) : null}
+        </View>
+        <Pressable
+          onPress={onRemove}
+          hitSlop={10}
+          style={({ pressed }) => [
+            styles.pdfRemoveBtn,
+            pressed && styles.pdfRemoveBtnPressed,
+          ]}
+          accessibilityLabel="Remover PDF"
+        >
+          <X size={16} color={palette.neutral[500]} weight="bold" />
+        </Pressable>
+      </View>
+    );
+  }
+  return (
+    <Pressable
+      onPress={onPick}
+      style={({ pressed }) => [
+        styles.pdfPicker,
+        pressed && styles.pdfPickerPressed,
+      ]}
+    >
+      <Paperclip size={18} color={palette.primary[600]} weight="bold" />
+      <Text style={styles.pdfPickerText}>Anexar PDF</Text>
+    </Pressable>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Focus toggle: three mutually-exclusive pills. Default is "communication" so
+// the existing app behaviour is preserved unless the user actively shifts.
+// ---------------------------------------------------------------------------
+
+const FOCUS_OPTIONS: { value: FocusMode; label: string }[] = [
+  { value: "communication", label: "Comunicação" },
+  { value: "technical", label: "Técnico" },
+  { value: "both", label: "Ambos" },
+];
+
+function FocusToggle({
+  value,
+  onChange,
+}: {
+  value: FocusMode;
+  onChange: (m: FocusMode) => void;
+}) {
+  return (
+    <View style={styles.focusWrap}>
+      <Text style={styles.focusTitle}>Onde queres treinar mais?</Text>
+      <Text style={styles.focusSubtitle}>
+        O plano vai dar mais peso a esta dimensão.
+      </Text>
+      <View style={styles.focusSegment}>
+        {FOCUS_OPTIONS.map((opt) => {
+          const selected = opt.value === value;
+          return (
+            <Pressable
+              key={opt.value}
+              onPress={() => {
+                Haptics.selectionAsync().catch(() => {});
+                onChange(opt.value);
+              }}
+              style={({ pressed }) => [
+                styles.focusSegmentItem,
+                selected && styles.focusSegmentItemSelected,
+                pressed && !selected && styles.focusSegmentItemPressed,
+              ]}
+            >
+              <Text
+                numberOfLines={1}
+                style={[
+                  styles.focusSegmentText,
+                  selected && styles.focusSegmentTextSelected,
+                ]}
+              >
+                {opt.label}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   headerRow: {
     flexDirection: "row",
@@ -790,6 +1010,9 @@ const styles = StyleSheet.create({
     marginTop: spacing.sm,
   },
   field: { gap: spacing.sm, marginBottom: spacing.lg },
+  // Step 4 has three stacked widgets (textarea, PDF slot, focus toggle), so
+  // it needs more breathing room than the single-input steps.
+  fieldStep4: { gap: spacing.lg, marginBottom: spacing.lg },
   input: {
     backgroundColor: palette.neutral[50],
     borderWidth: 1,
@@ -1009,5 +1232,123 @@ const styles = StyleSheet.create({
     fontFamily: fonts.bold,
     fontSize: 12,
     color: palette.primary[600],
+  },
+  pdfPicker: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: spacing.sm,
+    paddingVertical: 14,
+    borderRadius: radii.lg,
+    borderWidth: 1,
+    borderStyle: "dashed",
+    borderColor: palette.primary[300],
+    backgroundColor: palette.primary[50],
+  },
+  pdfPickerPressed: {
+    backgroundColor: palette.primary[100],
+  },
+  pdfPickerText: {
+    fontFamily: fonts.extrabold,
+    fontSize: 14,
+    color: palette.primary[700],
+  },
+  pdfAttached: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: radii.lg,
+    borderWidth: 1,
+    borderColor: palette.neutral[200],
+    backgroundColor: palette.neutral[50],
+  },
+  pdfIconWrap: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: palette.primary[100],
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  pdfTextWrap: {
+    flex: 1,
+    minWidth: 0,
+  },
+  pdfName: {
+    fontFamily: fonts.extrabold,
+    fontSize: 14,
+    color: colors.text,
+  },
+  pdfMeta: {
+    fontFamily: fonts.semibold,
+    fontSize: 12,
+    color: palette.neutral[500],
+    marginTop: 1,
+  },
+  pdfRemoveBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: palette.neutral[100],
+  },
+  pdfRemoveBtnPressed: {
+    backgroundColor: palette.neutral[200],
+  },
+  focusWrap: {
+    gap: spacing.xs,
+  },
+  focusTitle: {
+    fontFamily: fonts.extrabold,
+    fontSize: 16,
+    lineHeight: 22,
+    color: colors.text,
+  },
+  focusSubtitle: {
+    fontFamily: fonts.semibold,
+    fontSize: 13,
+    lineHeight: 18,
+    color: palette.neutral[500],
+    marginBottom: spacing.sm,
+  },
+  // Segmented control: pill-shaped container with neutral fill, three equal
+  // segments. The selected segment pops with primary fill + white text; the
+  // others sit transparent on the container background.
+  focusSegment: {
+    flexDirection: "row",
+    padding: 4,
+    borderRadius: 999,
+    backgroundColor: palette.neutral[100],
+  },
+  focusSegmentItem: {
+    flex: 1,
+    minWidth: 0,
+    paddingVertical: 10,
+    paddingHorizontal: 6,
+    borderRadius: 999,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  focusSegmentItemPressed: {
+    backgroundColor: palette.neutral[200],
+  },
+  focusSegmentItemSelected: {
+    backgroundColor: palette.primary[500],
+    shadowColor: palette.primary[700],
+    shadowOpacity: 0.18,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 2,
+  },
+  focusSegmentText: {
+    fontFamily: fonts.extrabold,
+    fontSize: 13,
+    color: palette.neutral[700],
+  },
+  focusSegmentTextSelected: {
+    color: palette.white,
   },
 });

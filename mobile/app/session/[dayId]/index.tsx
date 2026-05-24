@@ -15,6 +15,7 @@ import {
   CircleNotchIcon as CircleNotch,
   FlameIcon as Flame,
   HeartIcon as Heart,
+  MicrophoneSlashIcon as MicrophoneSlash,
   XIcon as X,
 } from "phosphor-react-native";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -102,11 +103,19 @@ export default function SessionRecord() {
     if (router.canGoBack()) router.back();
     else router.replace("/plans");
   };
-  const { dayId } = useLocalSearchParams<{ dayId: string }>();
+  const { dayId, retry } = useLocalSearchParams<{
+    dayId: string;
+    retry?: string;
+  }>();
+  const isRetry = retry === "1";
   const [day, setDay] = useState<PlanDay | null>(null);
   const [plan, setPlan] = useState<Plan | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // In retry mode we surface the prior session's main improvement tip on the
+  // intro screen so the user records with a clear focus. Null until the
+  // previous session is fetched (or if there isn't one for some reason).
+  const [focusTip, setFocusTip] = useState<string | null>(null);
 
   const [step, setStep] = useState<Step>("intro");
 
@@ -115,6 +124,10 @@ export default function SessionRecord() {
   const recorderState = useAudioRecorderState(recorder, 100);
   const [elapsed, setElapsed] = useState(0);
   const [uploading, setUploading] = useState(false);
+  // When the backend rejects the recording (422: too short or empty
+  // transcript) we park the pt-PT explanation here and render TooShortStep
+  // instead of bouncing through the generic error block.
+  const [tooShort, setTooShort] = useState<string | null>(null);
   const [pendingResult, setPendingResult] = useState<SessionResult | null>(null);
   // Motivational sentence from Haiku, fetched in parallel with the upload so
   // the celebration flow can land on a personalized message without ever
@@ -146,7 +159,10 @@ export default function SessionRecord() {
     }
 
     function applyMatch(match: { plan: Plan; day: PlanDay }): boolean {
-      if (match.day.completed_at) {
+      // Retry mode lets the user re-record a day they already completed
+      // *today*. The day_date guard still applies (you can't retry past
+      // days), but completed_at is no longer a redirect to the result.
+      if (!isRetry && match.day.completed_at) {
         router.replace(`/session/${match.day.id}/result`);
         return true;
       }
@@ -175,12 +191,26 @@ export default function SessionRecord() {
           return;
         }
         applyMatch(match);
+        if (isRetry) {
+          // Load the previous attempt's feedback to surface a focus tip on
+          // the intro screen. Best-effort: if the fetch fails, the intro
+          // just renders without the tip.
+          try {
+            const prev = await api.getSessionForDay(match.day.id);
+            const fb = prev?.feedback;
+            const tip =
+              (fb?.suggestions?.[0] || fb?.weaknesses?.[0] || "").trim();
+            if (tip) setFocusTip(tip);
+          } catch {
+            // ignored
+          }
+        }
       } catch (e) {
         setError((e as Error).message);
         setLoading(false);
       }
     })();
-  }, [dayId, router]);
+  }, [dayId, isRetry, router]);
 
   useEffect(() => {
     (async () => {
@@ -246,6 +276,20 @@ export default function SessionRecord() {
       setError("Gravação não foi guardada. Tenta de novo.");
       return;
     }
+
+    // Fast-fail too-short recordings locally — same 5s threshold the backend
+    // uses (MIN_SESSION_DURATION_S). Catches the obvious case (user taps
+    // TERMINADO after a handful of seconds) without an upload round-trip, so
+    // the celebration choreography never starts on something we know is going
+    // to be rejected. Backend 422 stays as a safety net for the rare edge
+    // case where elapsed >= 5 but Whisper returns an empty transcript.
+    if (elapsed < 5) {
+      setTooShort(
+        "A tua gravação foi demasiado curta. Precisamos de pelo menos 5 segundos para te darmos um feedback útil. Responde com um pouco mais de detalhe e tenta de novo.",
+      );
+      return;
+    }
+
     setUploading(true);
     setPendingMotivation(null);
 
@@ -282,7 +326,12 @@ export default function SessionRecord() {
       setPendingResult(result);
     } catch (e) {
       if (cancelledRef.current) return;
-      setError((e as Error).message);
+      const err = e as Error & { tooShort?: boolean };
+      if (err.tooShort) {
+        setTooShort(err.message);
+      } else {
+        setError(err.message);
+      }
       setUploading(false);
     }
   }
@@ -313,6 +362,23 @@ export default function SessionRecord() {
           />
         </View>
       </SafeAreaView>
+    );
+  }
+
+  if (tooShort) {
+    return (
+      <TooShortStep
+        message={tooShort}
+        onRetry={() => {
+          setTooShort(null);
+          setPendingResult(null);
+          setPendingMotivation(null);
+          setReanalyzeReady(false);
+          setElapsed(0);
+          setStep("question");
+        }}
+        onClose={() => goBackOrHome()}
+      />
     );
   }
 
@@ -377,6 +443,7 @@ export default function SessionRecord() {
     return (
       <IntroStep
         day={day}
+        focusTip={isRetry ? focusTip : null}
         onClose={() => goBackOrHome()}
         onContinue={() => setStep("question")}
       />
@@ -410,11 +477,18 @@ export default function SessionRecord() {
       elapsed={elapsed}
       hasPermission={hasPermission}
       onClose={() => {
-        if (recorderState.isRecording) {
-          void stopAndUpload();
-        } else {
-          setStep("question");
+        // X on the record screen cancels the take instead of submitting it:
+        // stop the recorder if it's running (no upload, no Whisper call) and
+        // bounce back to the plan. Tapping X mid-recording was uploading by
+        // accident before. There's no "submit" semantics on this control.
+        if (tickRef.current) {
+          clearInterval(tickRef.current);
+          tickRef.current = null;
         }
+        if (recorderState.isRecording) {
+          recorder.stop().catch((e) => console.warn("stop failed", e));
+        }
+        goBackOrHome();
       }}
       onAutoStart={startRecording}
       onFinish={stopAndUpload}
@@ -428,6 +502,14 @@ export default function SessionRecord() {
 // look like "loading": each scene plays for a fixed window and the user only
 // sees the transcript + "VER FEEDBACK" CTA once the result has actually
 // arrived.
+//
+// We never want a misleading "Boa!" on a recording that's going to be
+// rejected, so duration checks happen up-front: the parent `stopAndUpload`
+// short-circuits locally when `elapsed < 5` (the same threshold the backend
+// uses) and renders `TooShortStep` instead of mounting this flow at all.
+// The backend 422 stays as a safety net for the rare empty-transcript edge
+// case (5s+ of silence / unintelligible noise) — if that fires mid-Boa,
+// the parent still swaps in TooShortStep.
 //
 //   boa        ~2.1s  big "Boa!" with confetti + success haptic
 //   rail       ~4.4s  mini day list with the just-finished day flipping
@@ -1562,18 +1644,86 @@ function WaveBar({
 }
 
 // ---------------------------------------------------------------------------
+// Step: too short / empty transcript
+// Renders when the backend returns 422 on submit (recording <5s or Whisper
+// returned no text). The pt-PT message comes from the server so the reason is
+// explicit. Tapping REPETIR drops the user back at the question step so they
+// can run the whole record loop again with the existing day.
+// ---------------------------------------------------------------------------
+
+function TooShortStep({
+  message,
+  onRetry,
+  onClose,
+}: {
+  message: string;
+  onRetry: () => void;
+  onClose: () => void;
+}) {
+  const footer = (
+    <DuoButton
+      title="REPETIR"
+      iconRight={ArrowClockwise}
+      variant="primary"
+      onPress={onRetry}
+    />
+  );
+
+  return (
+    <Screen footer={footer}>
+      <View style={styles.stepHeader}>
+        <Pressable onPress={onClose} hitSlop={12}>
+          <X size={28} color={palette.neutral[400]} weight="bold" />
+        </Pressable>
+      </View>
+
+      <Animated.View
+        key="too-short"
+        entering={FadeIn.duration(260)}
+        style={styles.tooShortBody}
+      >
+        <Animated.View entering={FadeInDown.duration(380).delay(60)}>
+          <MicrophoneSlash
+            size={72}
+            color={palette.primary[500]}
+            weight="duotone"
+          />
+        </Animated.View>
+
+        <Animated.Text
+          entering={FadeInDown.duration(380).delay(140)}
+          style={styles.tooShortTitle}
+        >
+          Vamos repetir.
+        </Animated.Text>
+
+        <Animated.Text
+          entering={FadeInDown.duration(380).delay(220)}
+          style={styles.tooShortMessage}
+        >
+          {message}
+        </Animated.Text>
+      </Animated.View>
+    </Screen>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Step: intro
 // ---------------------------------------------------------------------------
 
 function IntroStep({
   day,
+  focusTip,
   onClose,
   onContinue,
 }: {
   day: PlanDay;
+  focusTip: string | null;
   onClose: () => void;
   onContinue: () => void;
 }) {
+  const isRetry = focusTip !== null;
   return (
     <Screen>
       <View style={styles.stepHeader}>
@@ -1589,9 +1739,9 @@ function IntroStep({
       >
         <Animated.View entering={FadeInDown.duration(360).delay(60)}>
           <Pill
-            label={`Dia ${day.day_index}`}
+            label={isRetry ? "Nova tentativa" : `Dia ${day.day_index}`}
             variant="info"
-            icon={Flame}
+            icon={isRetry ? ArrowClockwise : Flame}
             iconWeight="fill"
           />
         </Animated.View>
@@ -1607,11 +1757,25 @@ function IntroStep({
           entering={FadeInDown.duration(380).delay(220)}
           style={styles.introSubtitle}
         >
-          Treino de hoje. Respira fundo, vamos lá.
+          {isRetry
+            ? "Aplica o feedback que recebeste e tenta de novo."
+            : "Treino de hoje. Respira fundo, vamos lá."}
         </Animated.Text>
 
+        {focusTip ? (
+          <Animated.View
+            entering={FadeInDown.duration(420).delay(280)}
+            style={styles.focusTipWrap}
+          >
+            <Card style={styles.focusTipCard}>
+              <Text style={styles.focusTipEyebrow}>Foco desta tentativa</Text>
+              <Text style={styles.focusTipText}>{focusTip}</Text>
+            </Card>
+          </Animated.View>
+        ) : null}
+
         <Animated.View
-          entering={FadeInDown.duration(380).delay(300)}
+          entering={FadeInDown.duration(380).delay(focusTip ? 360 : 300)}
           style={styles.introCta}
         >
           <DuoButton
@@ -1649,7 +1813,7 @@ function QuestionStep({
   );
 
   return (
-    <Screen footer={footer}>
+    <Screen footer={footer} scroll>
       <View style={styles.stepHeader}>
         <Pressable onPress={onBack} hitSlop={12}>
           <ArrowLeft size={26} color={palette.neutral[500]} weight="bold" />
@@ -1835,10 +1999,51 @@ const styles = StyleSheet.create({
   introCta: {
     marginTop: spacing.md,
   },
+  focusTipWrap: {
+    marginTop: spacing.md,
+  },
+  focusTipCard: {
+    backgroundColor: palette.primary[50],
+    borderColor: palette.primary[200],
+    gap: spacing.xs,
+  },
+  focusTipEyebrow: {
+    ...t.eyebrow,
+  },
+  focusTipText: {
+    fontFamily: fonts.semibold,
+    fontSize: 16,
+    lineHeight: 22,
+    color: palette.neutral[800],
+  },
+
+  // Too-short / empty-transcript step
+  tooShortBody: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: spacing.lg,
+    paddingHorizontal: spacing.lg,
+    paddingBottom: spacing.huge,
+  },
+  tooShortTitle: {
+    fontFamily: fonts.black,
+    fontSize: 32,
+    lineHeight: 38,
+    color: colors.text,
+    textAlign: "center",
+  },
+  tooShortMessage: {
+    ...t.bodyMuted,
+    fontSize: 16,
+    lineHeight: 22,
+    textAlign: "center",
+    maxWidth: 340,
+  },
 
   // Question step
   questionStepBody: {
-    flex: 1,
+    flexGrow: 1,
     justifyContent: "center",
     gap: spacing.lg,
     paddingBottom: spacing.huge,

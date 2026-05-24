@@ -3,18 +3,22 @@ import unicodedata
 from collections import Counter
 
 UNIGRAM_FILLERS = {
-    # Hesitation sounds / vocalised pauses
+    # Hesitation sounds / vocalised pauses. Include variants Whisper actually
+    # emits for pt-PT recordings (multiple m/h spellings) so the counter
+    # doesn't silently drop a near-miss spelling.
     "ah", "ahh", "ahhh", "ahn", "ahnn", "ahm",
-    "eh", "ehh", "ehhh", "ehm", "ehnn",
-    "uh", "uhh", "uhhh", "uhm", "uhmm",
-    "ham", "hum", "humm", "hmm", "hmmm", "mm", "mmm", "mhm",
+    "eh", "ehh", "ehhh", "ehm", "ehmm", "ehnn",
+    "uh", "uhh", "uhhh", "uhm", "uhmm", "umm",
+    "ham", "hum", "humm", "hummm", "hmm", "hmmm", "hmmmm",
+    "mm", "mmm", "mmmm", "mhm",
     "ahem",
     # pt-PT discourse markers / verbal tics
     "tipo", "pronto", "prontos", "entao", "epa", "ya", "yah", "yap",
     "bem", "sabes", "percebes", "entendes", "vês", "ves",
     "digamos", "basicamente", "tas", "ta", "tah",
-    "ok", "okay", "olha", "ora", "fixe", "porra",
+    "ok", "okay", "olha", "olhe", "ora", "fixe", "porra",
     "portanto", "enfim", "afinal", "alias",
+    "imagina", "imagine", "pois",
     # Adverbial intensifiers commonly overused as fillers
     "obviamente", "claramente", "literalmente", "praticamente",
     "realmente", "efetivamente", "supostamente", "essencialmente",
@@ -50,6 +54,10 @@ BIGRAM_FILLERS = {
     ("ou", "menos"),
     ("ou", "assim"),
     ("ou", "qualquer"),
+    ("sei", "la"),
+    ("imagina", "la"),
+    ("imagine", "que"),
+    ("tipo", "coisa"),
     # closers
     ("no", "final"),
     ("ao", "fim"),

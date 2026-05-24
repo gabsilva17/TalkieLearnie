@@ -192,7 +192,7 @@ export default function PlansHomeScreen() {
 
   const startRename = useCallback(() => {
     if (!actionPlan) return;
-    setRenameValue(actionPlan.prep_for);
+    setRenameValue(actionPlan.name ?? actionPlan.prep_for);
     setRenamePlan(actionPlan);
     setActionPlan(null);
   }, [actionPlan]);
@@ -205,7 +205,8 @@ export default function PlansHomeScreen() {
   const submitRename = useCallback(async () => {
     if (!renamePlan) return;
     const trimmed = renameValue.trim();
-    if (!trimmed || trimmed === renamePlan.prep_for) {
+    const current = renamePlan.name ?? renamePlan.prep_for;
+    if (!trimmed || trimmed === current) {
       cancelRename();
       return;
     }
@@ -230,7 +231,7 @@ export default function PlansHomeScreen() {
     setActionPlan(null);
     Alert.alert(
       "Apagar plano?",
-      `Vais perder o histórico de "${plan.prep_for}". Esta acção é definitiva.`,
+      `Vais perder o histórico de "${plan.name ?? plan.prep_for}". Esta acção é definitiva.`,
       [
         { text: "Cancelar", style: "cancel" },
         {
@@ -340,7 +341,7 @@ export default function PlansHomeScreen() {
               ]}
               numberOfLines={2}
             >
-              {p.prep_for}
+              {p.name ?? p.prep_for}
             </Text>
           </View>
 
@@ -472,7 +473,7 @@ export default function PlansHomeScreen() {
           >
             <Text style={styles.sheetEyebrow}>Plano</Text>
             <Text style={styles.sheetTitle} numberOfLines={2}>
-              {actionPlan?.prep_for ?? ""}
+              {actionPlan ? (actionPlan.name ?? actionPlan.prep_for) : ""}
             </Text>
 
             <Pressable

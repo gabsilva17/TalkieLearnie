@@ -3,6 +3,7 @@ import * as Haptics from "expo-haptics";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import {
   ArrowCircleRightIcon as ArrowCircleRight,
+  ArrowClockwiseIcon as ArrowClockwise,
   CaretDownIcon as CaretDown,
   CheckCircleIcon as CheckCircle,
   type Icon,
@@ -227,11 +228,24 @@ export default function SessionResultScreen() {
   }
 
   const footer = (
-    <DuoButton
-      title="VOLTAR AO PLANO"
-      variant="primary"
-      onPress={() => router.replace("/")}
-    />
+    <View style={styles.footerStack}>
+      <DuoButton
+        title="VOLTAR AO PLANO"
+        variant="primary"
+        onPress={() => router.replace("/")}
+      />
+      <DuoButton
+        title="REPETIR PARA MELHORAR"
+        iconRight={ArrowClockwise}
+        variant="secondary"
+        onPress={() =>
+          router.replace({
+            pathname: `/session/${dayId}`,
+            params: { retry: "1" },
+          })
+        }
+      />
+    </View>
   );
 
   // Animate the full view as a single soft fade-in only the first time
@@ -282,7 +296,7 @@ export default function SessionResultScreen() {
             good={wpmIsGood(data.wpm)}
           />
           <MetricCol
-            eyebrow="Muletas"
+            eyebrow="Filler words"
             value={String(data.filler_count)}
             bandLabel={fillerLabel(data.filler_count)}
             good={fillerIsGood(data.filler_count)}
@@ -410,7 +424,7 @@ function ReplayBlock({ data }: { data: SessionResult }) {
       {data.filler_timestamps?.length ? (
         <View style={styles.fillerSection}>
           <Text style={styles.fillerHeading}>
-            Muletas ({data.filler_timestamps.length}) · toca para ouvir
+            Filler words ({data.filler_timestamps.length}) · toca para ouvir
           </Text>
           <View style={styles.fillerWrap}>
             {data.filler_timestamps.map((hit, i) => (
@@ -510,9 +524,9 @@ function FirstVisitPager({
             />
             <View style={styles.pg3_divider} />
             <MetricRow
-              eyebrow="Muletas"
+              eyebrow="Filler words"
               value={String(data.filler_count)}
-              unit={data.top_filler ? `"${data.top_filler}"` : "muletas"}
+              unit={data.top_filler ? `"${data.top_filler}"` : "filler words"}
               band={fillerLabel(data.filler_count)}
               good={fillerIsGood(data.filler_count)}
             />
@@ -952,6 +966,9 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     gap: spacing.lg,
     padding: spacing.xl,
+  },
+  footerStack: {
+    gap: spacing.sm,
   },
   errorText: { ...t.body, color: colors.danger, textAlign: "center" },
   headerRow: {

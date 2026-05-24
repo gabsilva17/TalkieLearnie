@@ -48,7 +48,7 @@
       [
         "expo-audio",
         {
-          "microphonePermission": "Permitir que a TalkieLearnie use o microfone para gravar a tua resposta."
+          "microphonePermission": "Permitir que a Talkie use o microfone para gravar a tua resposta."
         }
       ],
       [

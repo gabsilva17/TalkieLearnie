@@ -43,10 +43,6 @@ import {
   setAchievementsResultScreenActive,
 } from "@/lib/achievementsQueue";
 import { flushPendingPlanCompleted } from "@/lib/planCompletionQueue";
-import {
-  flushPendingStreakUnlock,
-  setStreakResultScreenActive,
-} from "@/lib/streakCelebration";
 import { FillerHit, SessionResult, api } from "@/lib/api";
 import {
   band,
@@ -127,29 +123,22 @@ export default function SessionResultScreen() {
   const [pageIndex, setPageIndex] = useState(0);
   const [done, setDone] = useState(false);
 
-  // All three celebration queues use the same "pending until result
-  // unmounts" pattern: achievements + plan-completion + streak-activation
-  // sit in a pending buffer during the post-record flow and only surface
-  // once result.tsx unmounts. That keeps the cards from painting over the
-  // CelebrationFlow or the rating reveal — they always appear over /plans.
+  // Achievements + plan-completion sit in a pending buffer during the
+  // post-record flow and only surface once result.tsx unmounts, so the
+  // cards never paint over the CelebrationFlow or the rating reveal.
+  // submitSession closes the achievement gate synchronously; this mount
+  // hook mirrors it for revisits where submitSession never ran. Plan
+  // completion has no gate, just a flush on unmount.
   //
-  // For achievements + streak, the gate is actually CLOSED earlier — by
-  // submitSession itself, synchronously, before its background profile-
-  // refresh IIFE starts. We mirror that here on mount so revisits of a past
-  // result page (where submitSession never ran) also suppress any enqueue
-  // that might happen mid-view. On unmount we open the gate, which
-  // auto-promotes pending → live queue; the explicit flush calls below are
-  // therefore redundant for streak/achievements but cheap and kept for
-  // readability + to flush plan completion (which has no gate).
+  // Streak activation is deliberately NOT gated here: we want the fire-
+  // ignition overlay to land DURING the celebration loading phases, not
+  // after the user dismisses the result screen. See submitSession.
   useEffect(() => {
     setAchievementsResultScreenActive(true);
-    setStreakResultScreenActive(true);
     return () => {
       setAchievementsResultScreenActive(false);
-      setStreakResultScreenActive(false);
       flushPendingAchievements();
       flushPendingPlanCompleted();
-      flushPendingStreakUnlock();
     };
   }, []);
 

@@ -498,24 +498,22 @@ Plan-completion celebration:
 Streak activation celebration:
 - Triggered when the user records the **first session of a new local day**,
   i.e. when `profile.streak_active_today` flips from false → true after a
-  submit. Choreography: Sessão → Coreografia → Resultado → tap "VOLTAR AO
-  PLANO" → full-screen "Streak ativado!" takeover with the fire "turning
-  on" → /plans.
-- `mobile/lib/streakCelebration.ts` — same shape as
-  `planCompletionQueue.ts` (pending slot + live queue + subscribers). **No
-  AsyncStorage gate**. The transition is computed on the backend: `POST
-  /sessions` returns `celebrations.streak_just_activated` = true only on
-  the false → true edge (i.e. the user's first session of the local day).
-  Subsequent same-day submits return false and silently skip.
-- **Race-fix flag** (`setStreakResultScreenActive` /
-  `setAchievementsResultScreenActive`): streak + achievement parking
-  happens inside `submitSession` synchronously after the upload returns.
-  The result screen's mount/unmount drives the gate via `result.tsx`'s
-  `useEffect`. The gate is closed before the parking so a fast user
-  navigating from the celebration flow into the result screen doesn't
-  cause cards to paint on top of the rating reveal; it's opened on
-  result.tsx unmount, which promotes pending. Plan completion uses the
-  same pattern (also parked synchronously inside `submitSession`).
+  submit. **Unlike achievements and plan completion, the streak overlay
+  lands DURING the loading choreography, not after the result screen.**
+  Choreography: Sessão → Coreografia (no meio, com `submitSession`
+  resolvido, sobe o full-screen "Streak ativado!" sobre a coreografia) →
+  tap CONTINUAR → volta à coreografia → Resultado → /plans.
+- `mobile/lib/streakCelebration.ts` — live queue + subscribers, **no
+  pending buffer, no gate**. `setPendingStreakUnlock` pushes straight into
+  the queue and notifies, so the overlay surfaces as soon as
+  `submitSession` returns with `streak_just_activated=true`. The
+  transition is computed on the backend: `POST /sessions` returns
+  `streak_just_activated=true` only on the false → true edge (first
+  session of the local day). Subsequent same-day submits return false and
+  silently skip. This is intentionally different from achievements + plan
+  completion, which still gate on `result.tsx` unmount via their own
+  pending buffers — the user explicitly asked the streak to be part of
+  the loading moment.
 - `mobile/components/ui/StreakUnlockedOverlay.tsx` — sibling in
   `_layout.tsx`, **mounted between** `AchievementUnlockedOverlay` and
   `PlanCompletedOverlay` so dismissal order is PlanCompleted → Streak →

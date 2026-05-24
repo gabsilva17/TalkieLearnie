@@ -6,17 +6,21 @@ UNIGRAM_FILLERS = {
     # Hesitation sounds / vocalised pauses. Include variants Whisper actually
     # emits for pt-PT recordings (multiple m/h spellings) so the counter
     # doesn't silently drop a near-miss spelling.
-    "ah", "ahh", "ahhh", "ahn", "ahnn", "ahm",
-    "eh", "ehh", "ehhh", "ehm", "ehmm", "ehnn",
-    "uh", "uhh", "uhhh", "uhm", "uhmm", "umm",
-    "ham", "hum", "humm", "hummm", "hmm", "hmmm", "hmmmm",
+    "ah", "ahh", "ahhh", "ahn", "ahnn", "ahm", "ahmm",
+    "eh", "ehh", "ehhh", "ehn", "ehm", "ehmm", "ehnn",
+    "uh", "uhh", "uhhh", "uhn", "uhnn", "uhm", "uhmm", "umm",
+    "hum", "humm", "hummm", "hmm", "hmmm", "hmmmm",
     "mm", "mmm", "mmmm", "mhm",
     "ahem",
-    # pt-PT discourse markers / verbal tics
+    # pt-PT discourse markers / verbal tics. NOTE: kept restricted to words
+    # whose dominant usage in casual speech is the verbal-tic sense. Words
+    # that are common in normal pt-PT prose (e.g. "bem", "sabes", "olha",
+    # "vês", "percebes", "entendes") are excluded here — flagging them
+    # produces too many false positives on legitimate sentences. The Sonnet
+    # judge can still call out genuine overuse from the transcript.
     "tipo", "pronto", "prontos", "entao", "epa", "ya", "yah", "yap",
-    "bem", "sabes", "percebes", "entendes", "vês", "ves",
-    "digamos", "basicamente", "tas", "ta", "tah",
-    "ok", "okay", "olha", "olhe", "ora", "fixe", "porra",
+    "digamos", "basicamente",
+    "ok", "okay", "ora", "fixe", "porra",
     "portanto", "enfim", "afinal", "alias",
     "imagina", "imagine", "pois",
     # Adverbial intensifiers commonly overused as fillers

@@ -1,4 +1,4 @@
--- TalkieLearnie — Supabase schema for use case 1.
+-- Talkie — Supabase schema for use case 1.
 -- Paste this into the Supabase SQL editor and run.
 
 create table plans (

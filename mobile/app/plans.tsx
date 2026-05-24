@@ -40,6 +40,7 @@ import { clearLastPlanId, setLastPlanId } from "@/lib/lastPlan";
 import {
   colors,
   fonts,
+  hairline,
   palette,
   radii,
   spacing,
@@ -385,14 +386,39 @@ export default function PlansHomeScreen() {
         {activePlans.length === 0 ? (
           <View style={styles.emptyWrap}>
             <View style={styles.empty}>
-              <Text style={styles.emptyTitle}>
-                {list.length === 0 ? "Começa um plano" : "Tudo concluído"}
-              </Text>
+              {list.length === 0 ? (
+                <Text style={styles.emptyTitle}>
+                  Pronto para{" "}
+                  <Text style={styles.emptyTitleAccent}>falar?</Text>
+                </Text>
+              ) : (
+                <Text style={styles.emptyTitle}>Tudo concluído</Text>
+              )}
               <Text style={styles.emptyBody}>
                 {list.length === 0
-                  ? "Diz-nos para que te queres preparar e a IA monta-te um plano diário."
+                  ? "A IA monta-te um plano diário para te preparares para aquele momento em que as tuas skills de comunicação precisam de estar afiadas."
                   : "Cria um novo plano para continuar a treinar."}
               </Text>
+              {list.length === 0 ? (
+                <View style={styles.featureList}>
+                  <View style={styles.featureItem}>
+                    <Text style={styles.featureNum}>01</Text>
+                    <Text style={styles.featureLabel}>
+                      Plano personalizado
+                    </Text>
+                  </View>
+                  <View style={styles.featureItem}>
+                    <Text style={styles.featureNum}>02</Text>
+                    <Text style={styles.featureLabel}>Treino por voz</Text>
+                  </View>
+                  <View style={styles.featureItem}>
+                    <Text style={styles.featureNum}>03</Text>
+                    <Text style={styles.featureLabel}>
+                      Feedback instantâneo
+                    </Text>
+                  </View>
+                </View>
+              ) : null}
               <View style={styles.emptyCta}>
                 <DuoButton
                   title="NOVO PLANO"
@@ -600,10 +626,43 @@ const styles = StyleSheet.create({
     color: colors.text,
     textAlign: "center",
   },
+  emptyTitleAccent: {
+    color: palette.primary[600],
+  },
   emptyBody: {
     ...t.bodyMuted,
     textAlign: "center",
-    maxWidth: 280,
+    maxWidth: 300,
+    marginTop: spacing.xs,
+  },
+  featureList: {
+    alignSelf: "stretch",
+    marginTop: spacing.xxl,
+    borderTopWidth: hairline,
+    borderTopColor: palette.neutral[200],
+  },
+  featureItem: {
+    flexDirection: "row",
+    alignItems: "baseline",
+    gap: spacing.lg,
+    paddingVertical: spacing.md,
+    borderBottomWidth: hairline,
+    borderBottomColor: palette.neutral[200],
+  },
+  featureNum: {
+    fontFamily: fonts.black,
+    fontSize: 18,
+    lineHeight: 22,
+    color: palette.primary[500],
+    fontVariant: ["tabular-nums"],
+    width: 32,
+  },
+  featureLabel: {
+    fontFamily: fonts.extrabold,
+    fontSize: 15,
+    lineHeight: 22,
+    color: colors.text,
+    flex: 1,
   },
   emptyCta: {
     marginTop: spacing.xl,

@@ -16,12 +16,12 @@ type Props = {
 };
 
 const SIZES = {
-  sm: 22,
-  md: 28,
-  lg: 34,
+  sm: 32,
+  md: 44,
+  lg: 56,
 } as const;
 
-// Wordmark "TalkieLearnie" in primary blue with a gentle breathing pulse, used
+// Wordmark "Talkie" in primary blue with a gentle breathing pulse, used
 // in place of an ActivityIndicator during page transitions.
 export function LogoMark({ size = "md", style }: Props) {
   const pulse = useSharedValue(1);
@@ -47,7 +47,7 @@ export function LogoMark({ size = "md", style }: Props) {
           animatedStyle,
         ]}
       >
-        TalkieLearnie
+        Talkie
       </Animated.Text>
     </View>
   );

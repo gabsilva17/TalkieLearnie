@@ -12,6 +12,7 @@ import {
   CalendarBlankIcon as CalendarBlank,
   CaretLeftIcon as CaretLeft,
   CaretRightIcon as CaretRight,
+  CheckIcon as Check,
   FilePdfIcon as FilePdf,
   MicrophoneIcon as Microphone,
   PaperclipIcon as Paperclip,
@@ -34,6 +35,8 @@ import Animated, {
   interpolateColor,
   useAnimatedStyle,
   useSharedValue,
+  withDelay,
+  withSpring,
   withTiming,
 } from "react-native-reanimated";
 
@@ -158,6 +161,20 @@ export default function Onboarding() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [focusedField, setFocusedField] = useState<FieldKey | null>(null);
+  // Brief "✓" badge that pops up between steps when the user taps CONTINUAR.
+  // Three-phase choreography so the check is *fully* off-screen before we
+  // swap the step underneath:
+  //   "in"   — overlay + check entering / holding
+  //   "out"  — check shrinking + fading away (overlay backdrop still up so
+  //            the old field stays masked)
+  //   "idle" — step has been advanced, overlay's own FadeOut reveals the new
+  //            field underneath.
+  type ConfirmPhase = "idle" | "in" | "out";
+  const [confirmPhase, setConfirmPhase] = useState<ConfirmPhase>("idle");
+  const confirming = confirmPhase !== "idle";
+  const confirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const CONFIRM_HOLD_MS = 460;
+  const CONFIRM_EXIT_MS = 240;
 
   // Voice dictation state — mirrors the AskOverlay pattern: a mic inside each
   // text field. Hold-to-talk: press and hold to record, release to transcribe
@@ -225,9 +242,25 @@ export default function Onboarding() {
   }
 
   function next() {
-    if (!canContinue) return;
+    if (!canContinue || confirming) return;
     if (step < 3) {
-      setStep(((step + 1) as Step));
+      Haptics.notificationAsync(
+        Haptics.NotificationFeedbackType.Success,
+      ).catch(() => {});
+      // Phase 1: enter + hold.
+      setConfirmPhase("in");
+      confirmTimerRef.current = setTimeout(() => {
+        // Phase 2: tell the check to animate out (backdrop stays so the old
+        // field is still hidden).
+        setConfirmPhase("out");
+        confirmTimerRef.current = setTimeout(() => {
+          // Phase 3: check is gone — swap the step and let the backdrop
+          // FadeOut reveal the new field.
+          setStep(((step + 1) as Step));
+          setConfirmPhase("idle");
+          confirmTimerRef.current = null;
+        }, CONFIRM_EXIT_MS);
+      }, CONFIRM_HOLD_MS);
     } else {
       submit();
     }
@@ -298,9 +331,42 @@ export default function Onboarding() {
   const idleStyle = useAnimatedStyle(() => ({ opacity: 1 - morph.value }));
   const recordingStyle = useAnimatedStyle(() => ({ opacity: morph.value }));
 
+  // Button exit/entry driver. While the check badge is on screen the CTA
+  // shrinks and fades out so the moment reads as a single confirmation
+  // beat (input + button vanish together), then eases back into place for
+  // the next step.
+  const buttonOpacity = useSharedValue(1);
+  const buttonScale = useSharedValue(1);
+  useEffect(() => {
+    if (confirming) {
+      buttonOpacity.value = withTiming(0, {
+        duration: 200,
+        easing: Easing.out(Easing.quad),
+      });
+      buttonScale.value = withTiming(0.92, {
+        duration: 200,
+        easing: Easing.out(Easing.quad),
+      });
+    } else {
+      buttonOpacity.value = withTiming(1, {
+        duration: 260,
+        easing: Easing.out(Easing.cubic),
+      });
+      buttonScale.value = withTiming(1, {
+        duration: 260,
+        easing: Easing.out(Easing.cubic),
+      });
+    }
+  }, [confirming, buttonOpacity, buttonScale]);
+  const buttonStyle = useAnimatedStyle(() => ({
+    opacity: buttonOpacity.value,
+    transform: [{ scale: buttonScale.value }],
+  }));
+
   useEffect(() => {
     return () => {
       if (tickRef.current) clearInterval(tickRef.current);
+      if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current);
     };
   }, []);
 
@@ -452,111 +518,240 @@ export default function Onboarding() {
           ) : null}
         </View>
 
-        {step === 0 ? (
-          <View style={styles.field}>
-            <VoiceField
-              value={prepFor}
-              onChangeText={setPrepFor}
-              placeholder="Ex.: pitch de hackathon, entrevista de emprego..."
-              autoFocus
-              onFocus={() => setFocusedField("prep")}
-              onBlur={() => setFocusedField(null)}
-              animatedBorder={animatedBorder}
-              recording={recordingField === "prep"}
-              transcribing={transcribing}
-              meteringDb={recorderState.metering}
-              elapsed={elapsed}
-              onStartRecord={() => startDictation("prep")}
-              onStopRecord={stopDictation}
-              idleStyle={idleStyle}
-              recordingStyle={recordingStyle}
-            />
-          </View>
-        ) : null}
+        <View style={styles.fieldShell}>
+          {step === 0 ? (
+            <View style={styles.field}>
+              <VoiceField
+                value={prepFor}
+                onChangeText={setPrepFor}
+                placeholder="Ex.: pitch de hackathon, entrevista de emprego..."
+                autoFocus
+                onFocus={() => setFocusedField("prep")}
+                onBlur={() => setFocusedField(null)}
+                animatedBorder={animatedBorder}
+                recording={recordingField === "prep"}
+                transcribing={transcribing}
+                meteringDb={recorderState.metering}
+                elapsed={elapsed}
+                onStartRecord={() => startDictation("prep")}
+                onStopRecord={stopDictation}
+                idleStyle={idleStyle}
+                recordingStyle={recordingStyle}
+              />
+            </View>
+          ) : null}
 
-        {step === 1 ? (
-          <Animated.View
-            entering={FadeIn.duration(180)}
-            style={styles.field}
-          >
-            <CalendarPicker
-              value={targetDate}
-              onChange={setTargetDate}
-              min={tomorrow()}
-            />
-          </Animated.View>
-        ) : null}
+          {step === 1 ? (
+            <Animated.View
+              entering={FadeIn.duration(180)}
+              style={styles.field}
+            >
+              <CalendarPicker
+                value={targetDate}
+                onChange={setTargetDate}
+                min={tomorrow()}
+              />
+            </Animated.View>
+          ) : null}
 
-        {step === 2 ? (
-          <View style={styles.field}>
-            <VoiceField
-              value={audience}
-              onChangeText={setAudience}
-              placeholder="Ex.: júri não técnico, investidor série A, manager directo..."
-              autoFocus
-              onFocus={() => setFocusedField("audience")}
-              onBlur={() => setFocusedField(null)}
-              animatedBorder={animatedBorder}
-              recording={recordingField === "audience"}
-              transcribing={transcribing}
-              meteringDb={recorderState.metering}
-              elapsed={elapsed}
-              onStartRecord={() => startDictation("audience")}
-              onStopRecord={stopDictation}
-              idleStyle={idleStyle}
-              recordingStyle={recordingStyle}
-            />
-          </View>
-        ) : null}
+          {step === 2 ? (
+            <View style={styles.field}>
+              <VoiceField
+                value={audience}
+                onChangeText={setAudience}
+                placeholder="Ex.: júri não técnico, investidor série A, manager directo..."
+                autoFocus
+                onFocus={() => setFocusedField("audience")}
+                onBlur={() => setFocusedField(null)}
+                animatedBorder={animatedBorder}
+                recording={recordingField === "audience"}
+                transcribing={transcribing}
+                meteringDb={recorderState.metering}
+                elapsed={elapsed}
+                onStartRecord={() => startDictation("audience")}
+                onStopRecord={stopDictation}
+                idleStyle={idleStyle}
+                recordingStyle={recordingStyle}
+              />
+            </View>
+          ) : null}
 
-        {step === 3 ? (
-          <View style={styles.fieldStep4}>
-            <VoiceField
-              value={extraText}
-              onChangeText={setExtraText}
-              placeholder="Ex.: notas do briefing, perguntas frequentes, números-chave..."
-              onFocus={() => setFocusedField("extra")}
-              onBlur={() => setFocusedField(null)}
-              animatedBorder={animatedBorder}
-              recording={recordingField === "extra"}
-              transcribing={transcribing}
-              meteringDb={recorderState.metering}
-              elapsed={elapsed}
-              onStartRecord={() => startDictation("extra")}
-              onStopRecord={stopDictation}
-              idleStyle={idleStyle}
-              recordingStyle={recordingStyle}
-            />
+          {step === 3 ? (
+            <View style={styles.fieldStep4}>
+              <VoiceField
+                value={extraText}
+                onChangeText={setExtraText}
+                placeholder="Ex.: notas do briefing, perguntas frequentes, números-chave..."
+                onFocus={() => setFocusedField("extra")}
+                onBlur={() => setFocusedField(null)}
+                animatedBorder={animatedBorder}
+                recording={recordingField === "extra"}
+                transcribing={transcribing}
+                meteringDb={recorderState.metering}
+                elapsed={elapsed}
+                onStartRecord={() => startDictation("extra")}
+                onStopRecord={stopDictation}
+                idleStyle={idleStyle}
+                recordingStyle={recordingStyle}
+              />
 
-            <PdfAttachment pdf={pdf} onPick={pickPdf} onRemove={removePdf} />
+              <PdfAttachment pdf={pdf} onPick={pickPdf} onRemove={removePdf} />
 
-            {hasExtraContext ? (
-              <Animated.View
-                entering={FadeIn.duration(220)}
-                exiting={FadeOut.duration(160)}
-              >
-                <FocusToggle value={focusMode} onChange={setFocusMode} />
-              </Animated.View>
-            ) : null}
-          </View>
-        ) : null}
+              {hasExtraContext ? (
+                <Animated.View
+                  entering={FadeIn.duration(220)}
+                  exiting={FadeOut.duration(160)}
+                >
+                  <FocusToggle value={focusMode} onChange={setFocusMode} />
+                </Animated.View>
+              ) : null}
+            </View>
+          ) : null}
+
+          {confirming ? (
+            <Animated.View
+              pointerEvents="none"
+              style={styles.confirmOverlay}
+              entering={FadeIn.duration(160)}
+              exiting={FadeOut.duration(220)}
+            >
+              <View style={styles.confirmBackdrop} />
+              <ConfirmCheckBadge exiting={confirmPhase === "out"} />
+            </Animated.View>
+          ) : null}
+        </View>
 
         {error ? <Text style={styles.error}>{error}</Text> : null}
 
-        <View style={styles.buttonWrap}>
+        <Animated.View
+          style={[styles.buttonWrap, buttonStyle]}
+          pointerEvents={confirming ? "none" : "auto"}
+        >
           <DuoButton
             title={step < 3 ? "CONTINUAR" : "GERAR O MEU PLANO"}
             onPress={next}
-            disabled={!canContinue}
+            disabled={!canContinue || confirming}
             loading={submitting}
           />
-        </View>
+        </Animated.View>
 
         {step === 3 ? (
           <Text style={styles.hint}>A IA prepara as sessões em 10–20 segundos.</Text>
         ) : null}
       </View>
     </Screen>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Brief confirmation badge that masks the field area between steps. Primary
+// circle pops in with a spring, a soft ring ripples outward behind it, and a
+// white check inside finishes the moment. The whole overlay then fades out as
+// the next step's content slides into view.
+// ---------------------------------------------------------------------------
+
+function ConfirmCheckBadge({ exiting }: { exiting: boolean }) {
+  const ringScale = useSharedValue(0.55);
+  const ringOpacity = useSharedValue(0.55);
+  const circleScale = useSharedValue(0.3);
+  const circleOpacity = useSharedValue(0);
+  const checkScale = useSharedValue(0);
+  const checkOpacity = useSharedValue(0);
+
+  useEffect(() => {
+    // Ring ripples outward and fades — gives the moment a halo.
+    ringScale.value = withTiming(1.85, {
+      duration: 720,
+      easing: Easing.out(Easing.cubic),
+    });
+    ringOpacity.value = withTiming(0, {
+      duration: 720,
+      easing: Easing.out(Easing.cubic),
+    });
+    // Disk springs in, check icon lands a beat later so the eye sees the
+    // circle first then the tick.
+    circleScale.value = withSpring(1, {
+      mass: 0.5,
+      damping: 11,
+      stiffness: 180,
+    });
+    circleOpacity.value = withTiming(1, {
+      duration: 180,
+      easing: Easing.out(Easing.quad),
+    });
+    checkScale.value = withDelay(
+      90,
+      withTiming(1, {
+        duration: 260,
+        easing: Easing.out(Easing.back(1.6)),
+      }),
+    );
+    checkOpacity.value = withDelay(
+      90,
+      withTiming(1, {
+        duration: 200,
+        easing: Easing.out(Easing.quad),
+      }),
+    );
+  }, [
+    ringScale,
+    ringOpacity,
+    circleScale,
+    circleOpacity,
+    checkScale,
+    checkOpacity,
+  ]);
+
+  useEffect(() => {
+    if (!exiting) return;
+    // Check shrinks + fades first, then the circle follows. Both finish
+    // within ~240ms so the parent can swap the step right after.
+    checkScale.value = withTiming(0, {
+      duration: 160,
+      easing: Easing.in(Easing.cubic),
+    });
+    checkOpacity.value = withTiming(0, {
+      duration: 140,
+      easing: Easing.in(Easing.quad),
+    });
+    circleScale.value = withDelay(
+      60,
+      withTiming(0.4, {
+        duration: 220,
+        easing: Easing.in(Easing.cubic),
+      }),
+    );
+    circleOpacity.value = withDelay(
+      60,
+      withTiming(0, {
+        duration: 220,
+        easing: Easing.in(Easing.quad),
+      }),
+    );
+  }, [exiting, checkScale, checkOpacity, circleScale, circleOpacity]);
+
+  const ringStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: ringScale.value }],
+    opacity: ringOpacity.value,
+  }));
+  const circleStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: circleScale.value }],
+    opacity: circleOpacity.value,
+  }));
+  const checkStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: checkScale.value }],
+    opacity: checkOpacity.value,
+  }));
+
+  return (
+    <View style={styles.confirmCheckWrap}>
+      <Animated.View style={[styles.confirmCheckRing, ringStyle]} />
+      <Animated.View style={[styles.confirmCheckCircle, circleStyle]}>
+        <Animated.View style={checkStyle}>
+          <Check size={36} color={palette.white} weight="bold" />
+        </Animated.View>
+      </Animated.View>
+    </View>
   );
 }
 
@@ -1013,6 +1208,48 @@ const styles = StyleSheet.create({
   // Step 4 has three stacked widgets (textarea, PDF slot, focus toggle), so
   // it needs more breathing room than the single-input steps.
   fieldStep4: { gap: spacing.lg, marginBottom: spacing.lg },
+  // Relative container for the active step's field area. Anchors the absolute
+  // confirm overlay so its backdrop matches the field's exact footprint.
+  fieldShell: { position: "relative" },
+  confirmOverlay: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  confirmBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: colors.bg,
+  },
+  confirmCheckWrap: {
+    width: 96,
+    height: 96,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  confirmCheckRing: {
+    position: "absolute",
+    width: 96,
+    height: 96,
+    borderRadius: 48,
+    backgroundColor: palette.primary[200],
+  },
+  confirmCheckCircle: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: palette.primary[500],
+    alignItems: "center",
+    justifyContent: "center",
+    shadowColor: palette.primary[500],
+    shadowOpacity: 0.28,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 6,
+  },
   input: {
     backgroundColor: palette.neutral[50],
     borderWidth: 1,

@@ -81,7 +81,7 @@ _ADMIN_HTML = """<!doctype html>
 <html lang="pt-PT">
 <head>
 <meta charset="utf-8" />
-<title>TalkieLearnie · Admin</title>
+<title>Talkie · Admin</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <style>
   :root {
@@ -157,7 +157,7 @@ _ADMIN_HTML = """<!doctype html>
 <body>
 <header>
   <div>
-    <h1>TalkieLearnie · Admin</h1>
+    <h1>Talkie · Admin</h1>
     <div class="sub" id="updatedAt">-</div>
   </div>
   <div class="row">

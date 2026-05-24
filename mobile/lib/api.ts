@@ -5,10 +5,7 @@ import {
   setAchievementsResultScreenActive,
 } from "@/lib/achievementsQueue";
 import { setPendingPlanCompleted } from "@/lib/planCompletionQueue";
-import {
-  setPendingStreakUnlock,
-  setStreakResultScreenActive,
-} from "@/lib/streakCelebration";
+import { setPendingStreakUnlock } from "@/lib/streakCelebration";
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -482,15 +479,20 @@ export const api = {
         });
       }
 
-      // Close the achievement + streak gates synchronously before parking,
-      // so result.tsx's mount-time setActive(true) is a no-op and its
-      // unmount-time setActive(false) is what releases the pending entries.
+      // Close the achievement gate synchronously before parking, so
+      // result.tsx's mount-time setActive(true) is a no-op and its
+      // unmount-time setActive(false) is what releases the pending entry.
       setAchievementsResultScreenActive(true);
-      setStreakResultScreenActive(true);
 
       if (c.newly_earned_achievements.length > 0) {
         enqueueAchievements(c.newly_earned_achievements);
       }
+      // Streak is intentionally NOT gated: with the streak gate left at its
+      // default (false), `setPendingStreakUnlock` promotes the event into
+      // the live queue immediately and the StreakUnlockedOverlay surfaces on
+      // top of the CelebrationFlow choreography while the user is still
+      // "loading" their feedback. Achievements + plan completion stay gated
+      // so they only land after the result screen unmounts.
       if (c.streak_just_activated) {
         setPendingStreakUnlock({
           streak_current: c.streak_current,

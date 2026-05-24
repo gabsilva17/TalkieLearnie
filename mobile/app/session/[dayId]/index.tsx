@@ -1725,10 +1725,10 @@ function IntroStep({
 }) {
   const isRetry = focusTip !== null;
   return (
-    <Screen>
+    <Screen bg={palette.primary[500]}>
       <View style={styles.stepHeader}>
         <Pressable onPress={onClose} hitSlop={12}>
-          <X size={28} color={palette.neutral[400]} weight="bold" />
+          <X size={28} color={palette.primary[100]} weight="bold" />
         </Pressable>
       </View>
 
@@ -1748,14 +1748,14 @@ function IntroStep({
 
         <Animated.Text
           entering={FadeInDown.duration(380).delay(140)}
-          style={styles.introTitle}
+          style={styles.introTitleOnBlue}
         >
           {day.theme}
         </Animated.Text>
 
         <Animated.Text
           entering={FadeInDown.duration(380).delay(220)}
-          style={styles.introSubtitle}
+          style={styles.introSubtitleOnBlue}
         >
           {isRetry
             ? "Aplica o feedback que recebeste e tenta de novo."
@@ -1767,7 +1767,7 @@ function IntroStep({
             entering={FadeInDown.duration(420).delay(280)}
             style={styles.focusTipWrap}
           >
-            <Card style={styles.focusTipCard}>
+            <Card style={styles.focusTipCardOnBlue}>
               <Text style={styles.focusTipEyebrow}>Foco desta tentativa</Text>
               <Text style={styles.focusTipText}>{focusTip}</Text>
             </Card>
@@ -1781,7 +1781,7 @@ function IntroStep({
           <DuoButton
             title="CONTINUAR"
             iconRight={ArrowRight}
-            variant="primary"
+            variant="secondary"
             onPress={onContinue}
           />
         </Animated.View>
@@ -1991,10 +1991,22 @@ const styles = StyleSheet.create({
     lineHeight: 38,
     color: colors.text,
   },
+  introTitleOnBlue: {
+    fontFamily: fonts.black,
+    fontSize: 32,
+    lineHeight: 38,
+    color: palette.white,
+  },
   introSubtitle: {
     ...t.bodyMuted,
     fontSize: 16,
     lineHeight: 22,
+  },
+  introSubtitleOnBlue: {
+    fontFamily: fonts.semibold,
+    fontSize: 16,
+    lineHeight: 22,
+    color: palette.primary[100],
   },
   introCta: {
     marginTop: spacing.md,
@@ -2004,6 +2016,11 @@ const styles = StyleSheet.create({
   },
   focusTipCard: {
     backgroundColor: palette.primary[50],
+    borderColor: palette.primary[200],
+    gap: spacing.xs,
+  },
+  focusTipCardOnBlue: {
+    backgroundColor: palette.white,
     borderColor: palette.primary[200],
     gap: spacing.xs,
   },

@@ -1,3 +1,4 @@
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   Nunito_400Regular,
   Nunito_600SemiBold,
@@ -11,7 +12,7 @@ import { Stack, usePathname, useRouter } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { StatusBar } from "expo-status-bar";
 import { IconContext } from "phosphor-react-native";
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { StyleSheet, View } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 
@@ -20,18 +21,34 @@ import { BottomNav, type BottomNavProps } from "@/components/ui/BottomNav";
 import { PlanCompletedOverlay } from "@/components/ui/PlanCompletedOverlay";
 import { RevealOverlay } from "@/components/ui/RevealOverlay";
 import { StreakUnlockedOverlay } from "@/components/ui/StreakUnlockedOverlay";
-import { api, cacheKeys, setCached } from "@/lib/api";
-import { ensureCacheHydrated } from "@/lib/cache";
 import { getDeviceId } from "@/lib/deviceId";
-import { writeEarnedAchievementIds } from "@/lib/earnedAchievements";
 import { startPushPolling } from "@/lib/push";
 import { colors, fonts, palette } from "@/lib/theme";
 
 SplashScreen.preventAutoHideAsync().catch(() => {});
 
-// Kick off cache hydration as soon as the module loads so the boot router can
-// often skip the spinner entirely on warm cold-starts.
-const hydration = ensureCacheHydrated();
+// One-time sweep of legacy AsyncStorage keys from older builds. We previously
+// persisted (a) a stale-while-revalidate cache under `swr:*`, (b) an earned
+// achievement baseline, and (c) a streak celebration gate. All three were
+// removed in favour of fetching from the server, so any leftover entries on
+// existing installs would just take up space. Fire-and-forget; failure is
+// silent.
+const LEGACY_KEYS = new Set([
+  "earned_achievement_ids_v1",
+  "last_streak_celebration_date_v1",
+  "last_streak_celebration_date_v2",
+]);
+(async () => {
+  try {
+    const keys = await AsyncStorage.getAllKeys();
+    const stale = keys.filter(
+      (k) => k.startsWith("swr:") || LEGACY_KEYS.has(k),
+    );
+    if (stale.length > 0) await AsyncStorage.multiRemove(stale);
+  } catch {
+    // ignore
+  }
+})();
 
 export default function RootLayout() {
   const router = useRouter();
@@ -42,56 +59,10 @@ export default function RootLayout() {
     Nunito_800ExtraBold,
     Nunito_900Black,
   });
-  const [hydrated, setHydrated] = useState(false);
 
   useEffect(() => {
-    hydration.then(() => setHydrated(true)).catch(() => setHydrated(true));
-  }, []);
-
-  useEffect(() => {
-    if (loaded && hydrated) SplashScreen.hideAsync().catch(() => {});
-  }, [loaded, hydrated]);
-
-  // Background profile pre-warm so the Perfil tab never hits an empty-cache
-  // spinner. Runs once on app boot; Perfil's own useFocusEffect still refetches
-  // when the user actually visits the tab, so this is purely an opportunistic
-  // populate. Silent on failure.
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const id = await getDeviceId();
-        if (cancelled) return;
-        const p = await api.getProfile(id);
-        if (cancelled) return;
-        setCached(cacheKeys.profile(id), p, { persist: true });
-        // Seed the achievement-unlock baseline so submitSession can diff
-        // against it. Without this, a brand-new install could falsely
-        // celebrate every prior-server-side achievement on the very next
-        // submit. With it, the baseline always reflects the most recent
-        // server truth.
-        await writeEarnedAchievementIds(p.achievements);
-
-        // Note: we deliberately do NOT seed the streak-celebration date
-        // here. An earlier version did, to defend against the edge case
-        // where the device already has today's session in the DB but
-        // AsyncStorage is empty (fresh install, cache wipe, mid-day install
-        // of this feature). That seed silently locked out the celebration
-        // on the very first session under the new code, which is exactly
-        // the moment the user expects to see it. The remaining failure mode
-        // — one spurious celebration when AsyncStorage gets cleared while
-        // the streak is already lit — is harmless (it's a celebratory
-        // moment, not a destructive one). The IIFE in submitSession writes
-        // today to the gate when a real celebration fires; that gate write
-        // is the only source of truth.
-      } catch {
-        // silent
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    if (loaded) SplashScreen.hideAsync().catch(() => {});
+  }, [loaded]);
 
   useEffect(() => {
     let stopPolling: (() => void) | null = null;
@@ -114,7 +85,7 @@ export default function RootLayout() {
     };
   }, [router]);
 
-  if (!loaded || !hydrated) return null;
+  if (!loaded) return null;
 
   return (
     <SafeAreaProvider>
@@ -137,6 +108,7 @@ export default function RootLayout() {
         <Stack.Screen name="onboarding" options={{ headerShown: false }} />
         <Stack.Screen name="plans" options={{ headerShown: false }} />
         <Stack.Screen name="plan/[planId]/index" options={{ headerShown: false }} />
+        <Stack.Screen name="plan/pending" options={{ headerShown: false }} />
         <Stack.Screen name="session/[dayId]/index" options={{ headerShown: false }} />
         <Stack.Screen name="session/[dayId]/result" options={{ headerShown: false }} />
       </Stack>

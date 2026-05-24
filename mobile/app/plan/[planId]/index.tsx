@@ -9,16 +9,11 @@ import { DuoButton } from "@/components/ui/DuoButton";
 import { LogoMark } from "@/components/ui/LogoMark";
 import { Screen } from "@/components/ui/Screen";
 import { TopBar } from "@/components/ui/TopBar";
-import {
-  Plan,
-  cacheKeys,
-  getCached,
-  syncAllCaches,
-  useCached,
-} from "@/lib/api";
+import { Plan, api } from "@/lib/api";
 import { localTodayISO } from "@/lib/dayDate";
 import { getDeviceId } from "@/lib/deviceId";
 import { clearLastPlanId, setLastPlanId } from "@/lib/lastPlan";
+import { consumePendingPlan } from "@/lib/pendingPlan";
 import {
   colors,
   fonts,
@@ -37,7 +32,14 @@ function daysUntil(iso: string): number {
 export default function PlanDetailScreen() {
   const router = useRouter();
   const { planId } = useLocalSearchParams<{ planId: string }>();
-  const plan = useCached<Plan>(planId ? cacheKeys.plan(planId) : null);
+  // Warm hand-off from the /plan/pending optimistic screen: if the pending
+  // store still holds a plan with this id, drain it into our initial state
+  // so the detail screen mounts populated, with no loading flash between the
+  // last reveal animation and the real plan rail.
+  const [plan, setPlan] = useState<Plan | undefined>(() => {
+    if (!planId) return undefined;
+    return consumePendingPlan(planId) ?? undefined;
+  });
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -45,17 +47,14 @@ export default function PlanDetailScreen() {
     setError(null);
     try {
       const id = await getDeviceId();
-      // Full resync via the shared helper. After it returns, the per-plan
-      // cache reflects server truth and orphan rows have been pruned. If
-      // *this* plan no longer exists on the server (deleted on another
-      // device, DB reset), the cache entry is gone — bounce to /plans.
-      await syncAllCaches(id);
-      const synced = getCached<Plan>(cacheKeys.plan(planId));
-      if (!synced) {
+      const fresh = await api.getPlan(planId, id);
+      if (!fresh) {
+        // Plan no longer exists (deleted elsewhere, DB reset). Bounce home.
         await clearLastPlanId();
         router.replace("/plans");
         return;
       }
+      setPlan(fresh);
       setLastPlanId(planId).catch(() => {});
     } catch (e) {
       setError((e as Error).message);

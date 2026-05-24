@@ -31,12 +31,10 @@ import Animated, {
 } from "react-native-reanimated";
 
 import { DuoButton } from "@/components/ui/DuoButton";
-import { localTodayISO } from "@/lib/dayDate";
 import {
   dismissStreakUnlock,
   peekStreakUnlock,
   subscribeStreakUnlock,
-  writeLastStreakCelebrationDate,
   type StreakUnlockedEvent,
 } from "@/lib/streakCelebration";
 import { fonts, palette, spacing } from "@/lib/theme";
@@ -167,18 +165,18 @@ function CelebrationScreen({ event }: { event: StreakUnlockedEvent }) {
     );
 
     // Glow starts as soon as the flame is visible and breathes forever.
+    // Why `reverse: true` on a single `withTiming` instead of a
+    // `withSequence(up, down)` + `reverse: false`: with a sequence,
+    // `withRepeat` snaps the shared value back to the value it captured at
+    // the start of the first iteration (0) before re-running, producing a
+    // visible reset every cycle. A single timing + reverse ping-pongs in
+    // place and stays continuous.
     glow.value = withDelay(
       520,
       withRepeat(
-        withSequence(
-          withTiming(1, { duration: 900, easing: Easing.inOut(Easing.quad) }),
-          withTiming(0.35, {
-            duration: 900,
-            easing: Easing.inOut(Easing.quad),
-          }),
-        ),
+        withTiming(1, { duration: 1100, easing: Easing.inOut(Easing.quad) }),
         -1,
-        false,
+        true,
       ),
     );
 
@@ -213,11 +211,11 @@ function CelebrationScreen({ event }: { event: StreakUnlockedEvent }) {
   }));
   const haloStyle = useAnimatedStyle(() => ({
     opacity: 0.18 + glow.value * 0.42,
-    transform: [{ scale: 0.85 + glow.value * 0.35 }],
+    transform: [{ scale: 0.92 + glow.value * 0.16 }],
   }));
   const coreStyle = useAnimatedStyle(() => ({
     opacity: 0.32 + glow.value * 0.55,
-    transform: [{ scale: 0.7 + glow.value * 0.25 }],
+    transform: [{ scale: 0.82 + glow.value * 0.12 }],
   }));
   const sparkStyle1 = useAnimatedStyle(() => ({
     opacity: spark1.value,
@@ -295,14 +293,6 @@ function CelebrationScreen({ event }: { event: StreakUnlockedEvent }) {
               onPress={() => {
                 if (!enteringDone) return;
                 Haptics.selectionAsync().catch(() => {});
-                // Write the once-per-day gate only after the user has
-                // actually seen and dismissed the celebration. submitSession
-                // used to write this pre-emptively before enqueuing, which
-                // silently locked the user out if anything stopped the
-                // overlay from surfacing (race condition, app kill, prior
-                // buggy version). Writing here means a missed celebration
-                // always retries on the next session.
-                void writeLastStreakCelebrationDate(localTodayISO());
                 dismissStreakUnlock();
               }}
             />

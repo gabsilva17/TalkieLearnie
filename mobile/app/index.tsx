@@ -5,7 +5,7 @@ import Animated, { FadeIn } from "react-native-reanimated";
 
 import { LogoMark } from "@/components/ui/LogoMark";
 import { Screen } from "@/components/ui/Screen";
-import { Plan, api, cacheKeys, getCached, setCached } from "@/lib/api";
+import { api } from "@/lib/api";
 import { getDeviceId } from "@/lib/deviceId";
 
 export default function Index() {
@@ -16,21 +16,8 @@ export default function Index() {
     (async () => {
       try {
         const id = await getDeviceId();
-
-        // Plans home is always the entry point. We still hydrate the cache so
-        // the list paints without a spinner.
-        const cachedList = getCached<Plan[]>(cacheKeys.plans(id));
-        if (cachedList) {
-          router.replace(cachedList.length > 0 ? "/plans" : "/onboarding");
-          return;
-        }
-
         const plans = await api.getPlans(id);
         if (cancelled) return;
-        setCached(cacheKeys.plans(id), plans, { persist: true });
-        for (const p of plans) {
-          setCached(cacheKeys.plan(p.id), p, { persist: true });
-        }
         router.replace(plans.length > 0 ? "/plans" : "/onboarding");
       } catch (err) {
         if (cancelled) return;

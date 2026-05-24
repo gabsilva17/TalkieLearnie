@@ -46,14 +46,7 @@ import {
   flushPendingStreakUnlock,
   setStreakResultScreenActive,
 } from "@/lib/streakCelebration";
-import {
-  FillerHit,
-  SessionResult,
-  api,
-  cacheKeys,
-  getCached,
-  setCached,
-} from "@/lib/api";
+import { FillerHit, SessionResult, api } from "@/lib/api";
 import {
   band,
   colors,
@@ -127,11 +120,8 @@ export default function SessionResultScreen() {
     }
   }, [result]);
 
-  // Try the cache first so revisiting a completed day is instant.
-  const cachedSession = dayId ? getCached<SessionResult>(cacheKeys.session(dayId)) : null;
-
-  const [fetched, setFetched] = useState<SessionResult | null>(cachedSession ?? null);
-  const [loading, setLoading] = useState(!inlineData && !cachedSession);
+  const [fetched, setFetched] = useState<SessionResult | null>(null);
+  const [loading, setLoading] = useState(!inlineData);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [pageIndex, setPageIndex] = useState(0);
   const [done, setDone] = useState(false);
@@ -170,13 +160,12 @@ export default function SessionResultScreen() {
         const s = await api.getSessionForDay(dayId);
         if (cancelled) return;
         if (!s) {
-          if (!cachedSession) setFetchError("Ainda não há resultado para este dia.");
+          setFetchError("Ainda não há resultado para este dia.");
         } else {
-          setCached(cacheKeys.session(dayId), s);
           setFetched(s);
         }
       } catch (e) {
-        if (!cancelled && !cachedSession) setFetchError((e as Error).message);
+        if (!cancelled) setFetchError((e as Error).message);
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -184,9 +173,6 @@ export default function SessionResultScreen() {
     return () => {
       cancelled = true;
     };
-    // cachedSession captured by closure on mount — re-running on its change
-    // would refetch needlessly.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [inlineData, dayId]);
 
   const data = inlineData ?? fetched;

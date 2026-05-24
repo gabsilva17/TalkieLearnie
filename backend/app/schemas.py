@@ -39,6 +39,32 @@ class FillerHit(BaseModel):
     start: float
 
 
+class AchievementOut(BaseModel):
+    id: str
+    label: str
+    description: str
+    earned: bool
+    earned_at: datetime | None
+
+
+class SessionCelebrations(BaseModel):
+    """Snapshot of which transitions a single session triggered. Populated
+    only by POST /sessions (it's the only endpoint that can compute the
+    before → after diff in one transaction). GET /sessions leaves this null
+    — there's no "just unlocked" semantics for historical rows.
+    """
+
+    newly_earned_achievements: list[AchievementOut]
+    streak_just_activated: bool
+    streak_current: int
+    streak_best: int
+    streak_is_new_best: bool
+    plan_just_completed: bool
+    plan_id: UUID | None = None
+    plan_prep_for: str | None = None
+    plan_total_days: int | None = None
+
+
 class SessionOut(BaseModel):
     id: UUID
     plan_day_id: UUID
@@ -53,6 +79,7 @@ class SessionOut(BaseModel):
     rating: int
     feedback: dict
     created_at: datetime
+    celebrations: SessionCelebrations | None = None
 
 
 class ActivityPoint(BaseModel):
@@ -68,14 +95,6 @@ class WpmPoint(BaseModel):
 class RatingPoint(BaseModel):
     date: date
     rating: float
-
-
-class AchievementOut(BaseModel):
-    id: str
-    label: str
-    description: str
-    earned: bool
-    earned_at: datetime | None
 
 
 class ProfileOut(BaseModel):
@@ -121,3 +140,8 @@ class MotivationReq(BaseModel):
 
 class MotivationResp(BaseModel):
     message: str
+
+
+class ReanalyzeSessionReq(BaseModel):
+    device_id: str = Field(min_length=1)
+    transcript: str = Field(min_length=1, max_length=8000)

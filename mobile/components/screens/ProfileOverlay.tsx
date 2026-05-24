@@ -55,9 +55,7 @@ import {
   Profile,
   ProfileAchievement,
   ProfileActivityPoint,
-  cacheKeys,
-  syncAllCaches,
-  useCached,
+  api,
 } from "@/lib/api";
 import { getDeviceId } from "@/lib/deviceId";
 import {
@@ -100,7 +98,7 @@ function formatShortDate(iso: string): string {
 
 export function ProfileOverlay({ onClose }: { onClose: () => void }) {
   const [deviceId, setDeviceId] = useState<string | null>(null);
-  const profile = useCached<Profile>(deviceId ? cacheKeys.profile(deviceId) : null);
+  const [profile, setProfile] = useState<Profile | undefined>(undefined);
   const [name, setName] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -121,10 +119,8 @@ export function ProfileOverlay({ onClose }: { onClose: () => void }) {
     if (!deviceId) return;
     setError(null);
     try {
-      // Full resync — plans + profile + each plan detail + session
-      // invalidation. The user-facing intent is "refresh", and they expect
-      // every cached view to be in sync afterwards, not just this one.
-      await syncAllCaches(deviceId);
+      const p = await api.getProfile(deviceId);
+      setProfile(p);
     } catch (e) {
       setError((e as Error).message);
     }
@@ -1077,7 +1073,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "flex-end",
     paddingHorizontal: spacing.lg,
-    paddingTop: spacing.sm,
+    paddingTop: spacing.xl,
     paddingBottom: spacing.xs,
   },
   closeBtn: {

@@ -12,16 +12,20 @@ import {
   ArrowLeftIcon as ArrowLeft,
   ArrowRightIcon as ArrowRight,
   CheckIcon as Check,
+  CircleNotchIcon as CircleNotch,
   FlameIcon as Flame,
+  HeartIcon as Heart,
   XIcon as X,
 } from "phosphor-react-native";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
+  KeyboardAvoidingView,
+  Platform,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import Animated, {
@@ -48,7 +52,7 @@ import { DuoButton } from "@/components/ui/DuoButton";
 import { LogoMark } from "@/components/ui/LogoMark";
 import { Pill } from "@/components/ui/Pill";
 import { Screen } from "@/components/ui/Screen";
-import { Plan, PlanDay, SessionResult, api, cacheKeys, getCached } from "@/lib/api";
+import { Plan, PlanDay, SessionResult, api } from "@/lib/api";
 import { localTodayISO } from "@/lib/dayDate";
 import { getDeviceId } from "@/lib/deviceId";
 import {
@@ -116,6 +120,11 @@ export default function SessionRecord() {
   // the celebration flow can land on a personalized message without ever
   // looking like it's waiting on the network.
   const [pendingMotivation, setPendingMotivation] = useState<string | null>(null);
+  // Reanalysis is fired when the user edits the transcript and taps VER
+  // FEEDBACK. The thanks phase waits for `reanalyzeReady === true` before it
+  // advances, so the user always sees feedback that matches what they wrote.
+  // On failure we set `reanalyzeReady` anyway and keep the original result.
+  const [reanalyzeReady, setReanalyzeReady] = useState(false);
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
   const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const cancelledRef = useRef(false);
@@ -154,16 +163,6 @@ export default function SessionRecord() {
     (async () => {
       try {
         const id = await getDeviceId();
-
-        // Fast path: scan cached plans (the home screen pre-warms them).
-        const cachedList = getCached<Plan[]>(cacheKeys.plans(id));
-        if (cachedList) {
-          const match = findInPlans(cachedList);
-          if (match) {
-            if (applyMatch(match)) return;
-          }
-        }
-
         const plans = await api.getPlans(id);
         if (plans.length === 0) {
           router.replace("/onboarding");
@@ -324,6 +323,32 @@ export default function SessionRecord() {
         day={day}
         pendingResult={pendingResult}
         motivation={pendingMotivation}
+        reanalyzeReady={reanalyzeReady}
+        onEdited={(editedTranscript) => {
+          // User actually changed the transcript before tapping VER FEEDBACK.
+          // Kick off a real reanalysis: backend re-runs Sonnet (and the text
+          // metrics) against the corrected text, while the thanks phase plays
+          // its animation. The thanks-phase gate (`reanalyzeReady`) is what
+          // releases the navigation once the new feedback is in hand.
+          if (!pendingResult) return;
+          setReanalyzeReady(false);
+          void (async () => {
+            try {
+              const id = await getDeviceId();
+              const updated = await api.reanalyzeSession({
+                device_id: id,
+                session_id: pendingResult.id,
+                transcript: editedTranscript,
+              });
+              if (cancelledRef.current) return;
+              setPendingResult(updated);
+            } catch (e) {
+              console.warn("reanalyze failed", e);
+            } finally {
+              if (!cancelledRef.current) setReanalyzeReady(true);
+            }
+          })();
+        }}
         onContinue={() => {
           if (!pendingResult) return;
           router.replace({
@@ -339,6 +364,7 @@ export default function SessionRecord() {
           // again from scratch.
           setPendingResult(null);
           setPendingMotivation(null);
+          setReanalyzeReady(false);
           setUploading(false);
           setElapsed(0);
           setStep("question");
@@ -411,7 +437,13 @@ export default function SessionRecord() {
 //   transcript  --    transcript card + CTA, mirrors the old final state
 // ---------------------------------------------------------------------------
 
-type CelebrationPhase = "boa" | "rail" | "motivation" | "transcript";
+type CelebrationPhase =
+  | "boa"
+  | "rail"
+  | "motivation"
+  | "transcript"
+  | "thanks"
+  | "reformulating";
 
 // Crossfade timing between scenes. Kept short and snappy (560ms) — what the
 // user wants slower is the DWELL on each scene, not the wipe between them.
@@ -424,6 +456,8 @@ function CelebrationFlow({
   day,
   pendingResult,
   motivation,
+  reanalyzeReady,
+  onEdited,
   onContinue,
   onRetry,
 }: {
@@ -431,6 +465,8 @@ function CelebrationFlow({
   day: PlanDay;
   pendingResult: SessionResult | null;
   motivation: string | null;
+  reanalyzeReady: boolean;
+  onEdited: (editedTranscript: string) => void;
   onContinue: () => void;
   onRetry: () => void;
 }) {
@@ -439,6 +475,10 @@ function CelebrationFlow({
   // time before advancing — never less than ~2.4s, even if the upload has
   // already finished, so the message has time to land.
   const motivationStartRef = useRef<number | null>(null);
+  // Same pattern for reformulating: hold a minimum dwell so the loading copy
+  // doesn't flash past if Sonnet returns fast, then wait for reanalyzeReady
+  // before navigating.
+  const reformulatingStartRef = useRef<number | null>(null);
 
   // Dwell times per scene. Each scene needs enough air for the user to read
   // and feel the moment before the next one slides in. "Boa!" has to land,
@@ -449,6 +489,18 @@ function CelebrationFlow({
   const BOA_DWELL_MS = 3600;
   const RAIL_DWELL_MS = 6500;
   const MOTIVATION_MIN_DWELL_MS = 3000;
+  // Thanks is a fixed beat: thank the user for the correction, then hand off
+  // to the reformulating loader. No gate here — the network gate lives on
+  // the reformulating scene that follows.
+  const THANKS_DWELL_MS = 2500;
+  // Minimum air for the "a reformular o feedback" loader. Sonnet re-analysis
+  // often comes back faster than this; we don't want it to flicker past.
+  const REFORMULATING_MIN_DWELL_MS = 1800;
+
+  // onContinue is recreated on every parent render — read it through a ref so
+  // the reformulating timer doesn't restart on unrelated re-renders.
+  const onContinueRef = useRef(onContinue);
+  onContinueRef.current = onContinue;
 
   useEffect(() => {
     if (phase === "boa") {
@@ -457,6 +509,13 @@ function CelebrationFlow({
     }
     if (phase === "rail") {
       const t = setTimeout(() => setPhase("motivation"), RAIL_DWELL_MS);
+      return () => clearTimeout(t);
+    }
+    if (phase === "thanks") {
+      const t = setTimeout(
+        () => setPhase("reformulating"),
+        THANKS_DWELL_MS,
+      );
       return () => clearTimeout(t);
     }
     return undefined;
@@ -475,6 +534,25 @@ function CelebrationFlow({
     const t = setTimeout(() => setPhase("transcript"), remaining);
     return () => clearTimeout(t);
   }, [phase, pendingResult]);
+
+  // Reformulating gate: enter after the thanks beat, wait for BOTH the min
+  // dwell AND reanalyzeReady before navigating to /result. If Sonnet takes
+  // a while, the dwell is already satisfied and we just wait on the network;
+  // if it's instant, we still hold the loader until the min dwell so the
+  // user actually reads the "a reformular" copy.
+  useEffect(() => {
+    if (phase !== "reformulating") return;
+    reformulatingStartRef.current = Date.now();
+  }, [phase]);
+
+  useEffect(() => {
+    if (phase !== "reformulating" || !reanalyzeReady) return;
+    const startedAt = reformulatingStartRef.current ?? Date.now();
+    const elapsed = Date.now() - startedAt;
+    const remaining = Math.max(0, REFORMULATING_MIN_DWELL_MS - elapsed);
+    const t = setTimeout(() => onContinueRef.current(), remaining);
+    return () => clearTimeout(t);
+  }, [phase, reanalyzeReady]);
 
   // Each phase renders inside its own keyed Animated.View with absolute
   // positioning. When `phase` flips, React unmounts the old branch — but
@@ -519,13 +597,40 @@ function CelebrationFlow({
           <Animated.View
             key="transcript"
             entering={FadeIn.duration(PHASE_FADE_MS)}
+            exiting={FadeOut.duration(PHASE_FADE_MS)}
             style={StyleSheet.absoluteFillObject}
           >
             <TranscriptPhase
               data={pendingResult}
-              onContinue={onContinue}
+              onContinue={(wasEdited, editedTranscript) => {
+                if (wasEdited) {
+                  onEdited(editedTranscript);
+                  setPhase("thanks");
+                } else {
+                  onContinue();
+                }
+              }}
               onRetry={onRetry}
             />
+          </Animated.View>
+        )}
+        {phase === "thanks" && (
+          <Animated.View
+            key="thanks"
+            entering={FadeIn.duration(PHASE_FADE_MS)}
+            exiting={FadeOut.duration(PHASE_FADE_MS)}
+            style={StyleSheet.absoluteFillObject}
+          >
+            <ThanksPhase />
+          </Animated.View>
+        )}
+        {phase === "reformulating" && (
+          <Animated.View
+            key="reformulating"
+            entering={FadeIn.duration(PHASE_FADE_MS)}
+            style={StyleSheet.absoluteFillObject}
+          >
+            <ReformulatingPhase />
           </Animated.View>
         )}
       </View>
@@ -870,51 +975,168 @@ function TranscriptPhase({
   onRetry,
 }: {
   data: SessionResult;
-  onContinue: () => void;
+  onContinue: (wasEdited: boolean, editedTranscript: string) => void;
   onRetry: () => void;
 }) {
+  // The transcript card is now an editable surface. When the user touches up
+  // a Whisper mistake we route them through the thank-you phase before the
+  // result while the backend re-runs Sonnet against the corrected text.
+  const original = data.transcript;
+  const [text, setText] = useState(original);
+  const trimmed = text.trim();
+  const wasEdited = trimmed.length > 0 && trimmed !== original.trim();
+
   return (
-    <View style={transcriptStyles.root}>
-      <Animated.View
-        entering={FadeIn.duration(620)}
-        style={transcriptStyles.headerBlock}
-      >
-        <Text style={transcriptStyles.eyebrow}>A tua resposta</Text>
-        <Text style={transcriptStyles.title}>Pronto para o feedback?</Text>
-      </Animated.View>
+    <KeyboardAvoidingView
+      style={transcriptStyles.kav}
+      behavior={Platform.OS === "ios" ? "padding" : undefined}
+    >
+      <View style={transcriptStyles.root}>
+        <Animated.View
+          entering={FadeIn.duration(620)}
+          style={transcriptStyles.headerBlock}
+        >
+          <Text style={transcriptStyles.eyebrow}>A tua resposta</Text>
+          <Text style={transcriptStyles.title}>Pronto para o feedback?</Text>
+          <Text style={transcriptStyles.hint}>
+            Algo ficou mal transcrito? Toca no texto para corrigir.
+          </Text>
+        </Animated.View>
 
-      <Animated.View
-        entering={FadeInDown.duration(680).delay(180)}
-        style={transcriptStyles.cardBlock}
-      >
-        <Card style={transcriptStyles.card}>
-          <Text style={transcriptStyles.caption}>Transcrição</Text>
-          <ScrollView
-            style={transcriptStyles.scroll}
-            showsVerticalScrollIndicator
-          >
-            <Text style={transcriptStyles.text}>{data.transcript}</Text>
-          </ScrollView>
-        </Card>
-      </Animated.View>
+        <Animated.View
+          entering={FadeInDown.duration(680).delay(180)}
+          style={transcriptStyles.cardBlock}
+        >
+          <Card style={transcriptStyles.card}>
+            <Text style={transcriptStyles.caption}>Transcrição</Text>
+            <TextInput
+              style={transcriptStyles.input}
+              value={text}
+              onChangeText={setText}
+              multiline
+              textAlignVertical="top"
+              scrollEnabled
+              selectionColor={palette.primary[500]}
+              placeholder=""
+              accessibilityLabel="Transcrição editável"
+            />
+          </Card>
+        </Animated.View>
 
-      <Animated.View
-        entering={FadeInDown.duration(680).delay(340)}
-        style={transcriptStyles.actions}
-      >
-        <DuoButton
-          title="VER FEEDBACK"
-          iconRight={ArrowRight}
-          variant="primary"
-          onPress={onContinue}
-        />
-        <DuoButton
-          title="REPETIR"
-          iconRight={ArrowClockwise}
-          variant="secondary"
-          onPress={onRetry}
-        />
+        <Animated.View
+          entering={FadeInDown.duration(680).delay(340)}
+          style={transcriptStyles.actions}
+        >
+          <DuoButton
+            title="VER FEEDBACK"
+            iconRight={ArrowRight}
+            variant="primary"
+            onPress={() => onContinue(wasEdited, trimmed)}
+          />
+          <DuoButton
+            title="REPETIR"
+            iconRight={ArrowClockwise}
+            variant="secondary"
+            onPress={onRetry}
+          />
+        </Animated.View>
+      </View>
+    </KeyboardAvoidingView>
+  );
+}
+
+// --- Phase 5: thanks for the correction ------------------------------------
+// Only mounts when the user actually changed the transcript text. Plays for
+// a fixed window (THANKS_DWELL_MS) and then the CelebrationFlow advances to
+// the result screen on the user's behalf.
+
+function ThanksPhase() {
+  const scale = useSharedValue(0.4);
+  const opacity = useSharedValue(0);
+  const pulse = useSharedValue(1);
+
+  useEffect(() => {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(
+      () => {},
+    );
+    opacity.value = withTiming(1, { duration: 440 });
+    scale.value = withSpring(1, { mass: 0.9, damping: 9, stiffness: 150 });
+    pulse.value = withRepeat(
+      withSequence(
+        withTiming(1.06, { duration: 900, easing: Easing.inOut(Easing.quad) }),
+        withTiming(1, { duration: 900, easing: Easing.inOut(Easing.quad) }),
+      ),
+      -1,
+      false,
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const iconStyle = useAnimatedStyle(() => ({
+    opacity: opacity.value,
+    transform: [{ scale: scale.value * pulse.value }],
+  }));
+
+  return (
+    <View style={celebrationStyles.phaseRoot}>
+      <Animated.View style={iconStyle}>
+        <Heart size={92} color={palette.primary[500]} weight="fill" />
       </Animated.View>
+      <Animated.Text
+        entering={FadeInDown.duration(540).delay(180)}
+        style={celebrationStyles.thanksTitle}
+      >
+        Obrigado pela correção!
+      </Animated.Text>
+      <Animated.Text
+        entering={FadeInDown.duration(540).delay(320)}
+        style={celebrationStyles.thanksBody}
+      >
+        Vamos usar as tuas alterações para treinar o modelo e evitar este erro
+        no futuro.
+      </Animated.Text>
+    </View>
+  );
+}
+
+// --- Phase 6: reformulating the feedback -----------------------------------
+// Holds the screen while POST /sessions/{id}/reanalyze is in flight. Spinner
+// + "A reformular o feedback inicial..." copy. The CelebrationFlow gate
+// waits for both the min dwell AND `reanalyzeReady` before advancing.
+
+function ReformulatingPhase() {
+  const rotation = useSharedValue(0);
+
+  useEffect(() => {
+    rotation.value = withRepeat(
+      withTiming(360, { duration: 1100, easing: Easing.linear }),
+      -1,
+      false,
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const spinnerStyle = useAnimatedStyle(() => ({
+    transform: [{ rotate: `${rotation.value}deg` }],
+  }));
+
+  return (
+    <View style={celebrationStyles.phaseRoot}>
+      <Animated.View style={spinnerStyle}>
+        <CircleNotch size={64} color={palette.primary[500]} weight="bold" />
+      </Animated.View>
+      <Animated.Text
+        entering={FadeInDown.duration(540).delay(120)}
+        style={celebrationStyles.reformulatingTitle}
+      >
+        A reformular o feedback inicial
+      </Animated.Text>
+      <Animated.Text
+        entering={FadeInDown.duration(540).delay(260)}
+        style={celebrationStyles.reformulatingBody}
+      >
+        Estamos a aplicar as tuas correções à análise.
+      </Animated.Text>
     </View>
   );
 }
@@ -990,9 +1212,48 @@ const celebrationStyles = StyleSheet.create({
     color: colors.text,
     textAlign: "center",
   },
+  thanksTitle: {
+    fontFamily: fonts.black,
+    fontSize: 28,
+    lineHeight: 36,
+    color: colors.text,
+    textAlign: "center",
+    marginTop: spacing.xl,
+  },
+  thanksBody: {
+    fontFamily: fonts.semibold,
+    fontSize: 16,
+    lineHeight: 24,
+    color: palette.neutral[600],
+    textAlign: "center",
+    marginTop: spacing.md,
+    maxWidth: 320,
+  },
+  reformulatingTitle: {
+    fontFamily: fonts.black,
+    fontSize: 26,
+    lineHeight: 34,
+    color: colors.text,
+    textAlign: "center",
+    marginTop: spacing.xl,
+  },
+  reformulatingBody: {
+    fontFamily: fonts.semibold,
+    fontSize: 15,
+    lineHeight: 22,
+    color: palette.neutral[500],
+    textAlign: "center",
+    marginTop: spacing.sm,
+    maxWidth: 300,
+  },
 });
 
 const transcriptStyles = StyleSheet.create({
+  // KeyboardAvoidingView wrapper so the editable TextInput stays visible when
+  // the on-screen keyboard pops up.
+  kav: {
+    flex: 1,
+  },
   // Vertical+horizontal center. The phase wrapper above is absoluteFillObject
   // inside the celebration SafeAreaView, so this View owns the layout.
   root: {
@@ -1017,6 +1278,14 @@ const transcriptStyles = StyleSheet.create({
     color: colors.text,
     textAlign: "center",
   },
+  hint: {
+    fontFamily: fonts.semibold,
+    fontSize: 13,
+    lineHeight: 18,
+    color: palette.neutral[500],
+    textAlign: "center",
+    marginTop: spacing.xs,
+  },
   cardBlock: {
     width: "100%",
   },
@@ -1030,17 +1299,17 @@ const transcriptStyles = StyleSheet.create({
     color: palette.neutral[500],
     textAlign: "center",
   },
-  scroll: {
-    // Capped so the transcript card doesn't push the buttons off-screen on
-    // short devices. Long takes scroll inside the card.
-    maxHeight: 240,
-  },
-  text: {
+  input: {
+    // Same look as the previous read-only transcript text, just editable.
+    // Capped height + internal scroll keeps long takes from pushing the
+    // buttons off-screen on short devices.
     fontFamily: fonts.regular,
     fontSize: 14,
     lineHeight: 21,
     color: palette.neutral[700],
     textAlign: "center",
+    maxHeight: 240,
+    padding: 0,
   },
   actions: {
     width: "100%",
@@ -1152,9 +1421,15 @@ function RecordStep({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // The countdown's root has already washed to primary[500] by the time we
+  // mount, so the root colour cut is invisible. We just need the foreground
+  // (X, caption, timer, waveform, button) to ease in instead of popping.
   return (
     <View style={[recordStyles.root, { paddingTop: insets.top }]}>
-      <View style={recordStyles.topBar}>
+      <Animated.View
+        entering={FadeIn.duration(360).delay(80)}
+        style={recordStyles.topBar}
+      >
         <Pressable
           onPress={onClose}
           hitSlop={12}
@@ -1162,9 +1437,12 @@ function RecordStep({
         >
           <X size={28} color={palette.primary[100]} weight="bold" />
         </Pressable>
-      </View>
+      </Animated.View>
 
-      <View style={recordStyles.center}>
+      <Animated.View
+        entering={FadeIn.duration(520).delay(140)}
+        style={recordStyles.center}
+      >
         <Text style={recordStyles.caption}>
           {isRecording ? "A gravar" : "A preparar…"}
         </Text>
@@ -1180,9 +1458,10 @@ function RecordStep({
             Sem permissão de microfone. Activa nas Definições do telemóvel.
           </Text>
         ) : null}
-      </View>
+      </Animated.View>
 
-      <View
+      <Animated.View
+        entering={FadeIn.duration(360).delay(260)}
         style={[
           recordStyles.footer,
           { paddingBottom: insets.bottom + spacing.md },
@@ -1194,7 +1473,7 @@ function RecordStep({
           variant="secondary"
           onPress={onFinish}
         />
-      </View>
+      </Animated.View>
     </View>
   );
 }
@@ -1416,6 +1695,12 @@ function CountdownStep({
   const [index, setIndex] = useState(0);
   const labels = ["3", "2", "1", "VAI!"] as const;
 
+  // Bleeds the background from primary[50] (idle countdown) to primary[500]
+  // (record screen) during the VAI! beat. The next step's root is also
+  // primary[500], so by the time it mounts the colour already matches and
+  // there's no visible cut. 0 = light, 1 = deep blue.
+  const blueFill = useSharedValue(0);
+
   useEffect(() => {
     // Haptic on each label change.
     if (index < labels.length - 1) {
@@ -1424,15 +1709,24 @@ function CountdownStep({
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(
         () => {},
       );
+      // Start the blue wash exactly as VAI! lands. Easing.out so it rushes
+      // into deep blue early and then settles, instead of a linear ramp.
+      blueFill.value = withTiming(1, {
+        duration: 620,
+        easing: Easing.out(Easing.cubic),
+      });
     }
 
+    // Hold VAI! a touch longer than the digits so the wash has time to fully
+    // land before RecordStep takes over.
+    const dwell = index === labels.length - 1 ? 1100 : 900;
     const timer = setTimeout(() => {
       if (index < labels.length - 1) {
         setIndex((i) => i + 1);
       } else {
         onDone();
       }
-    }, 1000);
+    }, dwell);
 
     return () => clearTimeout(timer);
     // labels is a stable literal; intentionally only depend on index/onDone.
@@ -1442,9 +1736,39 @@ function CountdownStep({
   const current = labels[index];
   const isGo = index === labels.length - 1;
 
+  const rootAStyle = useAnimatedStyle(() => ({
+    backgroundColor: interpolateColor(
+      blueFill.value,
+      [0, 1],
+      [palette.primary[50], palette.primary[500]],
+    ),
+  }));
+
+  const backArrowAStyle = useAnimatedStyle(() => ({
+    opacity: 1 - blueFill.value,
+  }));
+
+  // The VAI! glyph rides the same blue wash: starts primary[700] and lands on
+  // white so it stays legible against the deep blue background.
+  const goNumberAStyle = useAnimatedStyle(() => ({
+    color: interpolateColor(
+      blueFill.value,
+      [0, 1],
+      [palette.primary[700], palette.white],
+    ),
+  }));
+
   return (
-    <View style={[styles.countdownRoot, { paddingTop: insets.top }]}>
-      <View style={[styles.stepHeader, { paddingHorizontal: spacing.xl }]}>
+    <Animated.View
+      style={[styles.countdownRoot, rootAStyle, { paddingTop: insets.top }]}
+    >
+      <Animated.View
+        style={[
+          styles.stepHeader,
+          { paddingHorizontal: spacing.xl },
+          backArrowAStyle,
+        ]}
+      >
         <Pressable onPress={onBack} hitSlop={12} disabled={isGo}>
           <ArrowLeft
             size={26}
@@ -1452,7 +1776,7 @@ function CountdownStep({
             weight="bold"
           />
         </Pressable>
-      </View>
+      </Animated.View>
 
       <View style={styles.countdownCenter}>
         <Animated.Text
@@ -1462,12 +1786,13 @@ function CountdownStep({
           style={[
             styles.countdownNumber,
             isGo && styles.countdownGo,
+            isGo ? goNumberAStyle : null,
           ]}
         >
           {current}
         </Animated.Text>
       </View>
-    </View>
+    </Animated.View>
   );
 }
 

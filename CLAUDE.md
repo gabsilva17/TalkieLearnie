@@ -60,14 +60,31 @@ Backend endpoints (`backend/app/routes/`):
   Used by the long-press action sheet on the plans home screen.
 - `GET /plans/current?device_id=…` — latest plan for the device, or `null`.
   Kept for back-compat; new code should use `GET /plans` or `GET /plans/{id}`.
-- `POST /sessions` — multipart audio + form fields `device_id`, `plan_day_id`.
-  Pipeline: Whisper → metrics (incl. filler timestamps) → Sonnet 4.6 forced-tool
-  analysis → audio persisted to `backend/data/audio/<uuid>.m4a` → Supabase insert.
-  Rejects with 403 if `plan_day.day_date != date.today()` on the server —
-  enforces the "today only" rule (matches the mobile UI lock).
+- `POST /sessions` — multipart audio + form fields `device_id`, `plan_day_id`,
+  and `tz_offset_minutes`. Pipeline: Whisper → metrics (incl. filler
+  timestamps) → Sonnet 4.6 forced-tool analysis → audio persisted to
+  `backend/data/audio/<uuid>.m4a` → Supabase insert. Rejects with 403 if
+  `plan_day.day_date != date.today()` on the server (enforces the "today
+  only" rule, matches the mobile UI lock). Also computes the celebration
+  diff and returns it on `session.celebrations`:
+  `newly_earned_achievements` (full `AchievementOut` objects),
+  `streak_just_activated`/`streak_current`/`streak_best`/`streak_is_new_best`,
+  and `plan_just_completed` + plan details when this session closed the
+  last incomplete day. `tz_offset_minutes` is required for the streak diff
+  (the boundary is the user's local day).
 - `GET /sessions?plan_day_id=…|device_id=…` — history. Each row includes
   `audio_url` (absolute, host-aware) and `filler_timestamps` so the result
   screen can replay audio and jump to each filler.
+- `POST /sessions/{session_id}/reanalyze` — body `{device_id, transcript}`.
+  Used when the user edits the Whisper transcript on the celebration flow's
+  cena 4: recomputes the text-derived metrics (`wpm`, `filler_count`,
+  `top_filler`) against the corrected text and re-runs the Sonnet 4.6 judge,
+  then updates the existing session row in-place. **Audio-derived signals
+  (`pacing_variation`, `filler_timestamps`) are preserved** because we have
+  no word-level timestamps for the edited text. 403 on device mismatch, 404
+  if the session doesn't exist. Returns the same `SessionOut` shape as
+  `POST /sessions` but with `celebrations=null` (it's not a fresh insert,
+  no diff to compute).
 - `GET /sessions/audio/{filename}` — streams a stored answer file. Filename is
   validated (alnum + `_-` + extension only) to prevent path traversal.
 - `GET /profile?device_id=…&tz_offset_minutes=…` — fully derived profile:
@@ -125,7 +142,40 @@ Mobile screen tree (`mobile/app/`):
   by other screens (used elsewhere for back-navigation), just not consulted
   at boot.
 - `onboarding.tsx` — 3-field form (prep_for, target_date, audience_info). On
-  success persists `lastPlanId` and routes to `/plan/[newPlanId]`.
+  submit, computes `n_days = min(7, daysUntilLocalMidnight(target_date))` on
+  the client (mirroring the server cap), fires `startPendingPlan(...)` (which
+  kicks off `POST /plans` in the background) and immediately
+  `router.replace("/plan/pending")`. We do NOT await the network here — the
+  pending screen owns the optimistic UI. `lastPlanId` is set later by
+  `/plan/[id]`'s focus effect, no longer here. The two text fields (`prep_for`
+  and `audience_info`) host a **hold-to-talk** mic icon anchored inside the
+  textarea (bottom-right). Same `onPressIn` / `onPressOut` pattern as the
+  Ask composer: hold to record, release to transcribe via `POST /ask/transcribe`
+  and append to the field; <400ms presses are silent no-ops. The recording
+  pill morph overlays the entire input with a waveform, mm:ss timer, and a
+  non-interactive primary mic indicator in the same bottom-right slot the
+  user's finger is already on.
+- `plan/pending.tsx` — optimistic plan-creation screen. Subscribes to
+  `mobile/lib/pendingPlan.ts` (an in-memory store seeded by onboarding) and
+  renders the same layout as `/plan/[id]` with N skeleton `DayCardSkeleton`s
+  (`mobile/components/ui/DayCardSkeleton.tsx`). Two independent waves drive
+  the choreography:
+  - Wave A ("generating frontier") advances every 700ms regardless of API
+    status — card 1 flips from `idle` (dim placeholder bars) to `generating`
+    (primary border, animated typing dots) at t=0, card 2 at t=700ms, etc.
+  - Wave B ("reveal count") only ticks once `POST /plans` resolves. From
+    that moment, one more skeleton is replaced by a real `DayCard` every
+    480ms. Once all N are revealed, the screen waits 320ms and calls
+    `router.replace("/plan/{id}")`.
+  The hand-off avoids a spinner flash: `/plan/[id]` calls
+  `consumePendingPlan(planId)` as its `useState` initializer, drains the
+  warm plan out of the store, and mounts already populated. If the API
+  errors out the pending screen shows a pt-PT retry CTA back to
+  `/onboarding` instead of the skeletons. Deep-linking to `/plan/pending`
+  with no active job bounces to `/plans` (the store is in-memory only, so
+  a kill-and-relaunch drops the context). **Don't await `createPlan` in
+  onboarding and don't reintroduce a loading screen here** — the whole
+  point is that the user sees cards filling in immediately.
 
 Navigation model: there are only two foreground routes (`/plans` and
 `/plan/{id}`). Chat and profile are full-screen overlays launched from a
@@ -170,7 +220,7 @@ Wiring lives in:
     overlays. Renders nothing while the queue is empty.
   - `mobile/lib/revealOverlay.ts` — queue + subscribe helpers
     (`openReveal`, `peekReveal`, `dismissReveal`, `subscribeReveal`).
-  The BottomNav only appears on `/plans` and `/plan/{id}` — focused
+  The BottomNav only appears on `/plans`, `/plan/pending`, and `/plan/{id}` — focused
   flows (`onboarding`, `session/[dayId]`, `session/[dayId]/result`) do
   NOT mount it.
 - `plans.tsx` — home: list of all plans for the device, each shown as
@@ -192,26 +242,37 @@ Wiring lives in:
   archived cards (rename / delete remain available).
 - `components/screens/AskOverlay.tsx` — pt-PT chat with Claude Haiku via
   `POST /ask`, presented as a reveal overlay launched from the TopBar
-  chat icon (no longer a tab). Pulls the active `lastPlanId`
-  (best-effort) so the backend can inject plan context. Conversation
-  history is component state only — refresh button or closing the
-  overlay resets it. Welcome screen shows 4 starter prompts. Composer
+  chat icon (no longer a tab). Loads every **active** plan (those still
+  with incomplete days) on open via `api.getPlans`, defaults the context
+  to `lastPlanId` when it matches one of them and falls back to the first
+  active plan otherwise. A full-width pill above the chat ("Contexto:
+  {plan_name}") shows which plan the assistant is anchored to. When 2+
+  active plans exist, the pill becomes a tappable dropdown (CaretDown
+  chevron on the right) that opens a modal picker letting the user switch
+  context mid-conversation; with a single plan the pill is static and
+  iconless. Selection is component state only, so closing the overlay
+  resets back to the `lastPlanId` default. Conversation history is also
+  component state only — refresh button or closing the overlay resets it.
+  Welcome screen shows 4 starter prompts. Composer
   is a single rounded **pill** holding the TextInput, the mic button,
   and the send button (ChatGPT-style). When the text input is empty,
-  the mic button shows next to send; tapping it records via `expo-audio`
-  (`useAudioRecorder`, same preset as the session screen) and on stop
-  posts the clip to `POST /ask/transcribe`, dropping the Whisper text
-  back into the input so the user can review/edit before sending. The
-  transition is a simple **opacity crossfade morph**: the idle pill sits
-  in normal flow, the recording pill overlays it absolutely with the
-  same footprint, and a single shared value (`composerMode` state →
-  `withTiming` ease-in-out quad over 320ms) drives `opacity: 1 → 0` on
-  one and `0 → 1` on the other. `pointerEvents` flips with the mode so
-  touches always hit the visible layer. The recording overlay is a
-  primary-blue pill containing a 28-bar metering-driven waveform that
-  fills the bar, a `mm:ss` timer (cap 120s), and a circular **stop pill**
-  containing a square white stop shape (per the spec). A small "Cancelar"
-  link below the pill discards the take without transcribing.
+  the mic button shows next to send. **Hold-to-talk, Instagram-style**:
+  `onPressIn` starts recording via `expo-audio` (`useAudioRecorder`, same
+  preset as the session screen) and `onPressOut` commits — stops, posts
+  the clip to `POST /ask/transcribe`, drops the Whisper text into the
+  input so the user can review/edit before sending. Anything held for
+  less than 400ms is treated as an accidental tap (no transcription, no
+  error toast — the `Solta para enviar` hint below the recording pill
+  teaches the pattern). The transition is a simple **opacity crossfade
+  morph**: the idle pill sits in normal flow, the recording pill overlays
+  it absolutely with the same footprint, and a single shared value
+  (`composerMode` state → `withTiming` ease-in-out quad over 320ms)
+  drives `opacity: 1 → 0` on one and `0 → 1` on the other. The idle
+  pill's `pointerEvents` stays `"auto"` across the morph so the
+  in-flight touch responder isn't dropped mid-hold. The recording
+  overlay is a primary-blue pill containing a 28-bar metering-driven
+  waveform, a `mm:ss` timer (cap 120s), and a non-interactive primary
+  circle with a white mic icon anchored where the user's finger sits.
   **Assistant messages render markdown** via `react-native-markdown-display`
   (bold, italics, headings, bullet / ordered lists, inline + fenced code,
   blockquotes, links). They sit full-width with no chat bubble; only user
@@ -260,10 +321,37 @@ Wiring lives in:
   plan if the day's `day_date` isn't today (deep-link safety net for the
   "today only" rule). `localTodayISO()` lives in `mobile/lib/dayDate.ts`.
   After "TERMINADO" the screen renders **`CelebrationFlow`** instead of a
-  loading bar: 4 cenas encadeadas com crossfade lento (1 "Boa!" + confetti,
-  2 mini day-rail com o dia actual a transitar de `current` para `done` com
-  bounce + check, 3 frase motivacional do Haiku via `POST /motivation` com
-  pulsação até `pendingResult` chegar, 4 transcript + botão "VER FEEDBACK").
+  loading bar: 4 cenas obrigatórias + 2 cenas condicionais (só com edição
+  da transcrição), todas encadeadas com crossfade lento. As 4 obrigatórias:
+  1 "Boa!" + confetti, 2 mini day-rail com o dia actual a transitar de
+  `current` para `done` com bounce + check, 3 frase motivacional do Haiku
+  via `POST /motivation` com pulsação até `pendingResult` chegar, 4
+  transcript editável + botão "VER FEEDBACK".
+  O cartão da cena 4 é um **`TextInput` multiline editável** (não um `Text`
+  read-only): o utilizador pode corrigir erros de transcrição do Whisper
+  antes de ver o feedback. Quando o texto foi alterado (`text.trim() !==
+  original.trim()`), tap em "VER FEEDBACK":
+    1. Dispara `POST /sessions/{id}/reanalyze` com o texto corrigido. O
+       backend recomputa `wpm` / `filler_count` / `top_filler` a partir do
+       novo texto e re-corre o Sonnet judge; `pacing_variation` e
+       `filler_timestamps` ficam como estavam (são acústicos, não temos
+       timestamps para o texto novo). A linha em `sessions` é actualizada
+       in-place.
+    2. **Cena 5 ("thanks")**, dwell fixo de 2.5s: Heart + "Obrigado pela
+       correção!" + "Vamos usar as tuas alterações para treinar o modelo".
+       Não tem gate de rede, é só uma batida emocional antes do loader.
+    3. **Cena 6 ("reformulating")**, dwell mínimo 1.8s **+** espera por
+       `reanalyzeReady` antes de avançar: `CircleNotch` a rodar +
+       "A reformular o feedback inicial" + "Estamos a aplicar as tuas
+       correções à análise." É aqui que vive a espera real pelo Sonnet —
+       se a reanalysis demorar mais que 1.8s, ficamos no loader até chegar;
+       se vier em <1s, ainda assim aguentamos 1.8s para o texto ler. Quando
+       o gate destrava, `onContinueRef.current()` navega para `/result` com
+       o `pendingResult` já actualizado.
+  Se a reanalysis falhar (timeout / 502), `reanalyzeReady` é posto a `true`
+  na mesma (no `finally`) e seguimos com o resultado original — é melhor
+  do que ficar preso no loader. Se o texto não foi tocado, salta directo
+  para `/result` como antes (sem reanalysis, sem thanks, sem reformulating).
   `POST /sessions` e `POST /motivation` são disparados em paralelo no
   `stopAndUpload` para que o vídeo total da coreografia (~9s mínimo) absorva
   a latência da pipeline. Não toques em "loading bar" aqui: o ponto é nunca
@@ -285,14 +373,6 @@ Achievement unlock celebration:
   mounted, so a flag toggled in `useEffect` had a race window where the
   celebration card painted during the choreography. Pending buffer has no
   flag and no race.
-- `mobile/lib/earnedAchievements.ts` — persistent AsyncStorage baseline of
-  earned achievement IDs (`earned_achievement_ids_v1`). This is what
-  `submitSession` diffs against, **not** the volatile profile cache — the
-  cache could be empty on cold start or mid-refresh from pre-warm, which
-  previously meant the diff returned `[]` and nothing was celebrated.
-  Updated on every successful `getProfile` call inside `submitSession` and
-  seeded once by the pre-warm in `_layout.tsx`. Don't switch back to a
-  cache-based snapshot — it silently broke unlocks on first launch.
 - `mobile/components/ui/AchievementUnlockedOverlay.tsx` — full-screen
   `useSyncExternalStore`-backed overlay mounted once in `_layout.tsx` (sibling
   of `<Stack>`). While there is a head entry it renders a dimmed scrim, a
@@ -302,40 +382,39 @@ Achievement unlock celebration:
   "CONTINUAR" `DuoButton` that pops the queue. Multi-unlock sessions show
   each in sequence. Disables the CTA until the entrance animation finishes
   (~520ms) so users can't dismiss before the celebration plays.
-- Wiring lives in `api.ts` → `submitSession`: reads the persisted earned-ID
-  set, awaits the background `getProfile` refresh, filters fresh achievements
-  for `earned && !prevIds.has(id)`, writes the new baseline, then
-  `enqueueAchievements(newly)` (into the pending buffer — does **not**
-  surface yet). The result screen's unmount-time flush is what makes them
-  visible.
-- **Baseline-drift detection** (same IIFE): the persisted earned-IDs set is
-  monotonic-grow only, so an external data wipe (admin console "delete db
-  data" during demos / dev) would silently lock out every re-earnable
-  achievement — the diff would always return `[]`. Signal: any ID in the
-  persisted baseline that's no longer present in the server's current earned
-  set. When drift is detected, treat the baseline as empty for this diff so
-  re-earned achievements resurface, AND null out `prevStreakDate` so today's
-  `last_streak_celebration_date_v2` gate doesn't block the streak unlock from
-  re-firing either. The same signal covers both gates because any DB wipe
-  affects achievements and streak in lockstep.
+- Detection lives in the **backend**. `POST /sessions` runs `build_profile`
+  twice (with the pre-insert sessions list and with the post-insert list),
+  diffs the two earned-achievement sets, and returns the deltas in a
+  `celebrations` object on the response. Mobile `submitSession` just reads
+  `session.celebrations.newly_earned_achievements` and pushes them into the
+  achievements queue. **No client-side diff, no pre-submit `getProfile`
+  call, no baseline.** This is what removed the entire class of
+  "celebration silently doesn't fire" bugs caused by stale baselines /
+  cache drift / race windows between submit and the post-submit profile
+  fetch. The tz offset has to ride along on the upload (form field
+  `tz_offset_minutes`) so the server can compute streak transitions
+  relative to the user's local day.
 
 Plan-completion celebration:
 - Triggered when a session closes the **last remaining day** of a plan
-  (derived from the cache; no plan-level `completed_at` column). The full
-  flow: Sessão → Coreografia → Resultado → tap "VOLTAR AO PLANO" →
+  (no plan-level `completed_at` column — derived). The full flow:
+  Sessão → Coreografia → Resultado → tap "VOLTAR AO PLANO" →
   full-screen "Plano completo!" takeover → /plans.
 - `mobile/lib/planCompletionQueue.ts` — same shape as
   `achievementsQueue.ts` but with a **pending slot** instead of suppression.
-  `submitSession` diffs the cached plan against the day it just closed; if
-  this was the final missing day, it `setPendingPlanCompleted(event)`
-  rather than enqueuing directly. The result screen's unmount cleanup
-  calls `flushPendingPlanCompleted()`, which promotes the parked event
-  into the live queue and notifies subscribers. This keeps the takeover
-  off-screen during the CelebrationFlow choreography AND during the rating
-  reveal, then releases it exactly as the user transitions back to /plans.
-  In-memory only — no AsyncStorage persistence, so killing the app between
-  TERMINADO and VOLTAR AO PLANO swallows the celebration. Acceptable for
-  the demo; revisit if the moment ever needs to survive a relaunch.
+  The backend computes "did this session close the last incomplete day"
+  inside `POST /sessions` (same transaction as the insert) and returns
+  `celebrations.plan_just_completed` + `plan_id` + `plan_prep_for` +
+  `plan_total_days`. Mobile `submitSession` calls
+  `setPendingPlanCompleted(...)` when the flag is true. The result screen's
+  unmount cleanup calls `flushPendingPlanCompleted()`, which promotes the
+  parked event into the live queue and notifies subscribers. This keeps
+  the takeover off-screen during the CelebrationFlow choreography AND
+  during the rating reveal, then releases it exactly as the user transitions
+  back to /plans. In-memory only — no AsyncStorage persistence, so killing
+  the app between TERMINADO and VOLTAR AO PLANO swallows the celebration.
+  Acceptable for the demo; revisit if the moment ever needs to survive a
+  relaunch.
 - `mobile/components/ui/PlanCompletedOverlay.tsx` — sibling of the
   achievement overlay in `_layout.tsx`, **mounted after it** so it paints
   on top (RN sibling order, no z-index). Full-bleed primary-500 background
@@ -353,43 +432,20 @@ Streak activation celebration:
   PLANO" → full-screen "Streak ativado!" takeover with the fire "turning
   on" → /plans.
 - `mobile/lib/streakCelebration.ts` — same shape as
-  `planCompletionQueue.ts` (pending slot + live queue + subscribers) plus
-  an AsyncStorage gate. The gate stores `last_streak_celebration_date_v2`
-  (local ISO date). The trigger fires only when stored !== today; without
-  this gate, every same-day submit would re-celebrate because
-  `streak_active_today` stays true all day. **The gate is written from the
-  overlay's CONTINUAR handler**, not from `submitSession`. Earlier code
-  wrote it pre-emptively at park time and that silently locked users out of
-  the day's celebration whenever the overlay failed to surface (the
-  race-fix scenario, an app kill between submit and dismiss, or a prior
-  buggy version). Writing on dismiss is the only path that survives those
-  failure modes — a missed celebration just retries on the next session.
-  Key bumped v1 → v2 to give pre-existing installs a fresh slate after the
-  fix landed.
+  `planCompletionQueue.ts` (pending slot + live queue + subscribers). **No
+  AsyncStorage gate**. The transition is computed on the backend: `POST
+  /sessions` returns `celebrations.streak_just_activated` = true only on
+  the false → true edge (i.e. the user's first session of the local day).
+  Subsequent same-day submits return false and silently skip.
 - **Race-fix flag** (`setStreakResultScreenActive` /
   `setAchievementsResultScreenActive`): streak + achievement parking
-  happens inside `submitSession`'s post-upload **async IIFE** (it has to
-  `await api.getProfile` to get the fresh server-truth). That IIFE can
-  resolve AFTER the user has already tapped "VOLTAR AO PLANO" — in which
-  case `result.tsx`'s unmount-time flush has already run with an empty
-  pending, and the late-landing event would sit in pending forever (no
-  one left to flush it, so the celebration silently never fires). The
-  fix: `result.tsx` flips a `resultScreenActive` boolean on
-  mount/unmount; `setPendingStreakUnlock` / `enqueueAchievements` check
-  it — if the result screen is NOT active, they promote to the live
-  queue immediately instead of staying in pending. Plan completion
-  doesn't need this — it's parked **synchronously** inside
-  `submitSession` before result.tsx ever mounts.
-- The `_layout.tsx` pre-warm **does not** seed the gate, even though
-  `streak_active_today` may already be true on app boot. An earlier
-  version did seed (to defend against AsyncStorage-empty + streak-active
-  edge cases), but that seed silently locked out the celebration the very
-  first time a user opened the app on a day where they had already
-  recorded a session under the old code. Removed. The remaining failure
-  mode — one spurious celebration when AsyncStorage is cleared while the
-  streak is already lit — is harmless (celebratory, not destructive). The
-  overlay's CONTINUAR handler is the single writer of the gate; that
-  write is the only source of truth.
+  happens inside `submitSession` synchronously after the upload returns.
+  The result screen's mount/unmount drives the gate via `result.tsx`'s
+  `useEffect`. The gate is closed before the parking so a fast user
+  navigating from the celebration flow into the result screen doesn't
+  cause cards to paint on top of the rating reveal; it's opened on
+  result.tsx unmount, which promotes pending. Plan completion uses the
+  same pattern (also parked synchronously inside `submitSession`).
 - `mobile/components/ui/StreakUnlockedOverlay.tsx` — sibling in
   `_layout.tsx`, **mounted between** `AchievementUnlockedOverlay` and
   `PlanCompletedOverlay` so dismissal order is PlanCompleted → Streak →
@@ -412,46 +468,35 @@ Streak activation celebration:
 
 AsyncStorage keys (`mobile/lib/`):
 - `device_id` (`lib/deviceId.ts`) — anonymous UUID, generated on first launch.
-- `last_plan_id` (`lib/lastPlan.ts`) — most-recently visited plan; the boot
-  router uses it to resume directly into that plan. Cleared on delete or when
-  the plan is no longer found server-side.
+- `last_plan_id` (`lib/lastPlan.ts`) — most-recently visited plan; back-nav
+  from a plan detail uses it. Cleared on delete or when the plan is no
+  longer found server-side.
 - `user_name` (`lib/userName.ts`) — display name shown on the profile
   greeting. Defaults to "Gabriel". Editable from the profile screen via the
   pencil affordance next to the name.
-- `earned_achievement_ids_v1` (`lib/earnedAchievements.ts`) — persisted set
-  of achievement IDs the device has already earned; `submitSession` diffs
-  against this baseline before the post-submit profile refresh.
-- `last_streak_celebration_date_v2` (`lib/streakCelebration.ts`) — local
-  ISO date of the last streak-activation celebration. Prevents
-  re-celebrating subsequent same-day sessions and stale celebrations
-  after a relaunch. Written only from the overlay's CONTINUAR handler.
-  Key bumped from v1 → v2 with the same-commit fix that moved the writer
-  out of `submitSession`; v1 entries are ignored so users locked out by
-  the old code path get a fresh slate.
-- `swr:*` (`lib/cache.ts`) — stale-while-revalidate cache for plans + profile.
-  Lives in memory; key keys (`plan:{id}`, `plans:{deviceId}`, `profile:{deviceId}`)
-  are also mirrored to AsyncStorage under the `swr:` prefix so cold boots can
-  render the last-seen plan/profile **instantly** while a background refetch
-  runs. Screens read via `useCached` (subscribes to writes) and write via
-  `setCached` after fetches; mutations in `api.ts` (`createPlan`,
-  `renamePlan`, `deletePlan`, `submitSession`) update the cache directly so
-  the home list / detail / profile reflect changes without any spinner. The
-  boot router (`app/index.tsx`) checks the hydrated cache first and routes
-  immediately if `lastPlanId` is known. **Don't bypass this** — adding a
-  `fetch` + `setLoading(true)` pattern back into a screen will re-introduce
-  the spinner flicker between tabs that the cache exists to prevent.
 
-  Every refresh in the app (pull-to-refresh and `useFocusEffect` on
-  `/plans`, `/plan/{id}`, Profile) routes through **`syncAllCaches(deviceId)`**
-  in `lib/api.ts` instead of fetching a single key. It fetches plans + profile
-  in parallel, writes through the list + every `plan:{id}` (the response
-  carries `days` inline so it's free), prunes orphan `plan:*` entries and
-  invalidates every `session:*` entry. Motivation: per-screen refreshes only
-  touched one cache key, so DB resets / external deletes left stale data on
-  other screens until the user happened to revisit them. Cost is one extra
-  network call per refresh, acceptable for the demo. If you add a new
-  cache-backed surface, fold it into `syncAllCaches` rather than bolting on
-  a separate refresh path.
+**That's it.** AsyncStorage stores only things that don't live in the
+database. Earlier builds also persisted (a) a stale-while-revalidate cache
+under `swr:*`, (b) an earned-achievement baseline
+(`earned_achievement_ids_v1`), and (c) a streak celebration gate
+(`last_streak_celebration_date_v2`). All three were corrupting
+achievement / streak celebrations (stale baselines / mid-flight cache
+writes / silent lockouts when the AsyncStorage write missed the celebration
+moment) and were removed. The boot block in `_layout.tsx` does a one-time
+`AsyncStorage.multiRemove` of any leftover entries.
+
+**No client-side cache, no derived-state persistence.** Screens read from
+the server on focus via plain `useState` + `useFocusEffect`; mutations
+(`createPlan`, `renamePlan`, `deletePlan`) update local state inline so the
+list reflects the change without a refetch. Celebrations (newly-earned
+achievements, streak activation, plan completion) are computed on the
+**backend** in the same transaction as the session insert and returned
+on `session.celebrations`; the client just parks them into the queues.
+Trade-off: killing the app between submit and the celebration overlay
+swallows that one celebration. Acceptable for the demo. **Don't
+reintroduce a cache layer, an AsyncStorage-backed baseline, or
+client-side celebration diffing** — every prior attempt had a stale-state
+failure mode that silently broke the popups.
 
 Screen transitions: the root Stack uses `animation: "fade"`, no
 slide_from_right. The chat + profile overlays don't go through the Stack
@@ -463,18 +508,6 @@ wants smooth fade in/out everywhere.
 `expo-file-system/legacy`**, NOT `fetch + FormData`. RN's `fetch + FormData` is
 flaky on Android + New Architecture and gave us "Network request failed". Don't
 revert this.
-
-**`useCached` in `mobile/lib/cache.ts` is backed by `useSyncExternalStore`,
-not `useState` + `useEffect(subscribe)`.** The naive pattern had a
-render→effect race: if `setCached` fired in the window between the component
-rendering with the key and the subscribe effect running, the `notify` call
-hit zero subscribers, the subscription went up late, and **the consumer
-never re-rendered** even though the new data was already in `memCache`. That
-made pull-to-refresh look broken (server returned the fresh list, the cache
-held the fresh list, the screen kept showing the old list) and stranded the
-Perfil screen on its ActivityIndicator. `useSyncExternalStore` reconciles the
-snapshot across subscribe boundaries, so a write that lands mid-mount still
-propagates. Don't revert to the `useState` + `useEffect` pattern.
 
 ## Running locally
 

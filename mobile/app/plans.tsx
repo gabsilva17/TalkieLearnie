@@ -34,13 +34,7 @@ import { LogoMark } from "@/components/ui/LogoMark";
 import { PressableScale } from "@/components/ui/PressableScale";
 import { Screen } from "@/components/ui/Screen";
 import { TopBar } from "@/components/ui/TopBar";
-import {
-  Plan,
-  api,
-  cacheKeys,
-  syncAllCaches,
-  useCached,
-} from "@/lib/api";
+import { Plan, api } from "@/lib/api";
 import { getDeviceId } from "@/lib/deviceId";
 import { clearLastPlanId, setLastPlanId } from "@/lib/lastPlan";
 import {
@@ -140,11 +134,7 @@ export default function PlansHomeScreen() {
     getDeviceId().then(setDeviceId).catch(() => {});
   }, []);
 
-  // Cache is the source of truth: mutations everywhere (this screen, the
-  // detail screen, submitSession) write through it. We subscribe via useCached
-  // so the list re-renders for free.
-  const cacheKey = deviceId ? cacheKeys.plans(deviceId) : null;
-  const plans = useCached<Plan[]>(cacheKey);
+  const [plans, setPlans] = useState<Plan[] | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
 
@@ -161,10 +151,8 @@ export default function PlansHomeScreen() {
     if (!deviceId) return;
     setError(null);
     try {
-      // Full resync: plans list + each plan detail + profile + session
-      // invalidation. Keeps every cached view aligned with the server even
-      // after external DB resets. See `syncAllCaches` in lib/api.ts.
-      await syncAllCaches(deviceId);
+      const list = await api.getPlans(deviceId);
+      setPlans(list);
     } catch (e) {
       setError((e as Error).message);
     }
@@ -224,9 +212,10 @@ export default function PlansHomeScreen() {
     setRenaming(true);
     try {
       const id = await getDeviceId();
-      // api.renamePlan writes the updated plan straight into the cache; the
-      // useCached subscription re-renders the list for us.
-      await api.renamePlan(renamePlan.id, id, trimmed);
+      const updated = await api.renamePlan(renamePlan.id, id, trimmed);
+      setPlans((prev) =>
+        prev ? prev.map((p) => (p.id === updated.id ? updated : p)) : prev,
+      );
       cancelRename();
     } catch (e) {
       Alert.alert("Erro", (e as Error).message);
@@ -251,9 +240,10 @@ export default function PlansHomeScreen() {
             setBusyId(plan.id);
             try {
               const id = await getDeviceId();
-              // api.deletePlan removes the row from the cached list — the
-              // useCached subscription re-renders without it.
               await api.deletePlan(plan.id, id);
+              setPlans((prev) =>
+                prev ? prev.filter((p) => p.id !== plan.id) : prev,
+              );
               await clearLastPlanId();
             } catch (e) {
               Alert.alert("Erro", (e as Error).message);

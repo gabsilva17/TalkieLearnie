@@ -19,16 +19,18 @@ import * as Haptics from "expo-haptics";
 import {
   ArrowClockwiseIcon as ArrowClockwise,
   ArrowUpIcon as ArrowUp,
-  BookmarkIcon as Bookmark,
+  CaretDownIcon as CaretDown,
+  CheckIcon as Check,
   MicrophoneIcon as Microphone,
   WarningCircleIcon as WarningCircle,
   XIcon as X,
 } from "phosphor-react-native";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
   KeyboardAvoidingView,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -45,12 +47,15 @@ import Animated, {
   FadeInUp,
   useAnimatedStyle,
   useSharedValue,
+  withDelay,
+  withRepeat,
+  withSequence,
   withTiming,
 } from "react-native-reanimated";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import { PressableScale } from "@/components/ui/PressableScale";
-import { Plan, api, cacheKeys, getCached, setCached } from "@/lib/api";
+import { Plan, api } from "@/lib/api";
 import { getDeviceId } from "@/lib/deviceId";
 import { getLastPlanId } from "@/lib/lastPlan";
 import {
@@ -89,10 +94,22 @@ export function AskOverlay({ onClose }: { onClose: () => void }) {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [activePlan, setActivePlan] = useState<Plan | null>(null);
+  // Active (non-archived) plans available as context. The Ask flow only
+  // surfaces plans the user is still training — archived ones would just
+  // pollute the picker.
+  const [availablePlans, setAvailablePlans] = useState<Plan[]>([]);
+  const [activePlanId, setActivePlanId] = useState<string | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
   const scrollRef = useRef<ScrollView | null>(null);
 
-  // Voice dictation state.
+  const activePlan = useMemo(
+    () => availablePlans.find((p) => p.id === activePlanId) ?? null,
+    [availablePlans, activePlanId],
+  );
+
+  // Voice dictation state. Hold-to-talk: onPressIn starts, onPressOut commits
+  // (transcribe + drop into the input). Anything shorter than MIN_HOLD_MS is
+  // treated as an accidental tap — no transcription, no error.
   const recorder = useAudioRecorder(RECORDING_OPTIONS);
   const recorderState = useAudioRecorderState(recorder, 100);
   const [voicePermission, setVoicePermission] = useState<boolean | null>(null);
@@ -100,7 +117,15 @@ export function AskOverlay({ onClose }: { onClose: () => void }) {
   const [transcribing, setTranscribing] = useState(false);
   const [composerMode, setComposerMode] = useState<"idle" | "recording">("idle");
   const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const cancelDictationRef = useRef(false);
+  const recordingStartRef = useRef<number>(0);
+  const recordingActiveRef = useRef(false);
+  // Tracks the user's intent to be holding the mic. Flipped true on press
+  // and false on release. Checked at every async resumption point inside
+  // startDictation so a fast tap-and-release before `prepareToRecordAsync`
+  // resolves doesn't leak a silent recording in the background (the bug
+  // that made the next press appear to do nothing).
+  const recordingIntentRef = useRef(false);
+  const MIN_HOLD_MS = 400;
 
   // Morph driver: 0 = idle composer, 1 = recording waveform. The two layers
   // sit on top of each other (one in normal flow, the other absolute) and
@@ -157,24 +182,31 @@ export function AskOverlay({ onClose }: { onClose: () => void }) {
     };
   }, []);
 
-  // Resolve the active plan once on mount. Closing the overlay unmounts the
-  // component, so the next open will refetch — exactly the prior tab-switch
-  // behavior. Hits the cache first so the context chip appears instantly.
+  // Fetch every available plan once on mount so the user can switch context
+  // mid-conversation when more than one plan is in progress. The overlay
+  // unmounts on close, so the next open refetches — same lifecycle as before.
+  // Active plans only (those with at least one day still incomplete or empty);
+  // archived plans would clutter the picker without adding signal.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const planId = await getLastPlanId();
-        if (!planId) return;
-        const cached = getCached<Plan>(cacheKeys.plan(planId));
-        if (cached && !cancelled) setActivePlan(cached);
         const deviceId = await getDeviceId();
-        const plan = await api.getPlan(planId, deviceId);
+        const [plans, lastId] = await Promise.all([
+          api.getPlans(deviceId),
+          getLastPlanId(),
+        ]);
         if (cancelled) return;
-        if (plan) {
-          setCached(cacheKeys.plan(plan.id), plan, { persist: true });
-          setActivePlan(plan);
+        const active = plans.filter(
+          (p) => p.days.length === 0 || p.days.some((d) => !d.completed_at),
+        );
+        setAvailablePlans(active);
+        if (active.length === 0) {
+          setActivePlanId(null);
+          return;
         }
+        const preferred = lastId && active.find((p) => p.id === lastId);
+        setActivePlanId(preferred ? preferred.id : active[0].id);
       } catch {
         // best-effort context — silent
       }
@@ -198,7 +230,7 @@ export function AskOverlay({ onClose }: { onClose: () => void }) {
         const deviceId = await getDeviceId();
         const res = await api.ask({
           device_id: deviceId,
-          plan_id: activePlan?.id ?? null,
+          plan_id: activePlanId,
           messages: next,
         });
         setMessages((prev) => [...prev, { role: "assistant", content: res.reply }]);
@@ -209,7 +241,7 @@ export function AskOverlay({ onClose }: { onClose: () => void }) {
         setLoading(false);
       }
     },
-    [activePlan?.id, loading, messages],
+    [activePlanId, loading, messages],
   );
 
   const reset = useCallback(() => {
@@ -228,22 +260,35 @@ export function AskOverlay({ onClose }: { onClose: () => void }) {
   }
 
   async function startDictation() {
-    if (loading || transcribing || recorderState.isRecording) return;
+    if (loading || transcribing || recordingIntentRef.current) return;
+    recordingIntentRef.current = true;
+    recordingStartRef.current = Date.now();
     const granted = await ensureMicPermission();
     if (!granted) {
+      recordingIntentRef.current = false;
       Alert.alert(
         "Microfone",
         "Precisamos de permissão de microfone para ditar a pergunta.",
       );
       return;
     }
+    if (!recordingIntentRef.current) {
+      // User released while we were asking for permission.
+      return;
+    }
     setError(null);
-    cancelDictationRef.current = false;
     setComposerMode("recording");
     try {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
       await recorder.prepareToRecordAsync();
+      if (!recordingIntentRef.current) {
+        // User released during prepare. Don't start a recording that no one
+        // is going to stop — that's how the next press ended up dead.
+        setComposerMode("idle");
+        return;
+      }
       recorder.record();
+      recordingActiveRef.current = true;
       setElapsed(0);
       tickRef.current = setInterval(() => {
         setElapsed((e) => {
@@ -255,6 +300,9 @@ export function AskOverlay({ onClose }: { onClose: () => void }) {
         });
       }, 1000);
     } catch (e) {
+      recordingActiveRef.current = false;
+      recordingIntentRef.current = false;
+      setComposerMode("idle");
       setError((e as Error).message);
     }
   }
@@ -264,17 +312,29 @@ export function AskOverlay({ onClose }: { onClose: () => void }) {
       clearInterval(tickRef.current);
       tickRef.current = null;
     }
+    const wasActive = recordingActiveRef.current;
+    const heldFor = Date.now() - recordingStartRef.current;
+    recordingActiveRef.current = false;
+    recordingIntentRef.current = false;
     setComposerMode("idle");
+    if (!wasActive) {
+      // Recording never started (permission denied / prepareToRecord still
+      // running when finger lifted). Nothing to stop, nothing to transcribe.
+      return;
+    }
     try {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
       await recorder.stop();
     } catch (e) {
       console.warn("stop dictation failed", e);
     }
-    if (cancelDictationRef.current) return;
+    if (heldFor < MIN_HOLD_MS) {
+      // Accidental tap on the mic. Stay silent — the "hold to talk" affordance
+      // (mic icon + hint while recording) already teaches the pattern.
+      return;
+    }
     const uri = recorder.uri;
     if (!uri) {
-      setError("Gravação não foi guardada. Tenta de novo.");
       return;
     }
     setTranscribing(true);
@@ -292,16 +352,6 @@ export function AskOverlay({ onClose }: { onClose: () => void }) {
     } finally {
       setTranscribing(false);
     }
-  }
-
-  function cancelDictation() {
-    cancelDictationRef.current = true;
-    if (tickRef.current) {
-      clearInterval(tickRef.current);
-      tickRef.current = null;
-    }
-    recorder.stop().catch(() => {});
-    setElapsed(0);
   }
 
   return (
@@ -339,11 +389,43 @@ export function AskOverlay({ onClose }: { onClose: () => void }) {
       </View>
 
       {activePlan ? (
-        <Animated.View entering={FadeIn.duration(200)} style={styles.contextChip}>
-          <Bookmark size={12} color={palette.primary[700]} weight="fill" />
-          <Text style={styles.contextChipText} numberOfLines={1}>
-            A usar contexto: {activePlan.prep_for}
-          </Text>
+        <Animated.View entering={FadeIn.duration(200)} style={styles.contextChipWrap}>
+          <Pressable
+            onPress={() => {
+              if (availablePlans.length <= 1) return;
+              Haptics.selectionAsync().catch(() => {});
+              setPickerOpen(true);
+            }}
+            disabled={availablePlans.length <= 1}
+            style={({ pressed }) => [
+              styles.contextChip,
+              pressed && availablePlans.length > 1
+                ? styles.contextChipPressed
+                : null,
+            ]}
+            accessibilityRole={availablePlans.length > 1 ? "button" : "text"}
+            accessibilityLabel={
+              availablePlans.length > 1
+                ? `Contexto: ${activePlan.prep_for}. Toca para trocar de plano.`
+                : `Contexto: ${activePlan.prep_for}`
+            }
+          >
+            <View style={styles.contextChipBody}>
+              <Text style={styles.contextChipEyebrow}>Contexto</Text>
+              <Text style={styles.contextChipText} numberOfLines={1}>
+                {activePlan.prep_for}
+              </Text>
+            </View>
+            {availablePlans.length > 1 ? (
+              <View style={styles.contextChipCaret}>
+                <CaretDown
+                  size={14}
+                  color={palette.primary[700]}
+                  weight="bold"
+                />
+              </View>
+            ) : null}
+          </Pressable>
         </Animated.View>
       ) : null}
 
@@ -361,12 +443,7 @@ export function AskOverlay({ onClose }: { onClose: () => void }) {
         >
           {messages.length === 0 ? (
             <Animated.View entering={FadeIn.duration(220)} style={styles.welcome}>
-              <Text style={styles.welcomeEyebrow}>Perguntar</Text>
               <Text style={styles.welcomeTitle}>Em que te posso ajudar?</Text>
-              <Text style={styles.welcomeBody}>
-                Tira dúvidas sobre comunicação, entrevistas, pitches ou perguntas
-                difíceis. Podes escrever ou tocar no microfone para ditar.
-              </Text>
               <View style={styles.suggestions}>
                 {SUGGESTIONS.map((s, i) => (
                   <Animated.View
@@ -427,7 +504,7 @@ export function AskOverlay({ onClose }: { onClose: () => void }) {
           <View style={styles.layerStack}>
             <Animated.View
               style={[styles.composerPill, idleStyle]}
-              pointerEvents={composerMode === "idle" ? "auto" : "none"}
+              pointerEvents="auto"
             >
               <TextInput
                 value={input}
@@ -453,7 +530,8 @@ export function AskOverlay({ onClose }: { onClose: () => void }) {
                 >
                   <Animated.View style={micInnerStyle}>
                     <Pressable
-                      onPress={startDictation}
+                      onPressIn={startDictation}
+                      onPressOut={stopDictation}
                       disabled={loading || !micVisible}
                       hitSlop={6}
                       style={({ pressed }) => [
@@ -461,7 +539,7 @@ export function AskOverlay({ onClose }: { onClose: () => void }) {
                         pressed ? styles.micBtnPressed : null,
                         loading ? styles.micBtnDisabled : null,
                       ]}
-                      accessibilityLabel="Ditar pergunta por voz"
+                      accessibilityLabel="Manter premido para ditar a pergunta"
                     >
                       <Microphone size={18} color={palette.primary[600]} weight="bold" />
                     </Pressable>
@@ -494,44 +572,98 @@ export function AskOverlay({ onClose }: { onClose: () => void }) {
 
             <Animated.View
               style={[styles.recordingPill, styles.recordingPillAbsolute, recordingStyle]}
-              pointerEvents={composerMode === "recording" ? "auto" : "none"}
+              pointerEvents="none"
             >
               <Waveform
                 amplitude={meteringToAmp(recorderState.metering)}
                 active={composerMode === "recording"}
               />
               <Text style={styles.recordingTimer}>{formatMmSs(elapsed)}</Text>
-              <Pressable
-                onPress={stopDictation}
-                hitSlop={6}
-                style={({ pressed }) => [
-                  styles.stopBtn,
-                  pressed ? { backgroundColor: palette.primary[700] } : null,
-                ]}
-                accessibilityLabel="Terminar gravação e transcrever"
-              >
-                <View style={styles.stopSquare} />
-              </Pressable>
+              <View style={styles.recordingMicIndicator}>
+                <Microphone size={18} color={palette.white} weight="bold" />
+              </View>
             </Animated.View>
           </View>
 
           {composerMode === "recording" ? (
-            <Animated.View entering={FadeIn.duration(200).delay(160)}>
-              <Pressable
-                onPress={cancelDictation}
-                hitSlop={10}
-                style={({ pressed }) => [
-                  styles.cancelBtn,
-                  pressed ? { backgroundColor: palette.neutral[100] } : null,
-                ]}
-                accessibilityLabel="Cancelar gravação"
-              >
-                <Text style={styles.cancelBtnText}>Cancelar</Text>
-              </Pressable>
+            <Animated.View entering={FadeIn.duration(200).delay(120)}>
+              <Text style={styles.holdHint}>Solta para enviar</Text>
             </Animated.View>
           ) : null}
         </View>
       </KeyboardAvoidingView>
+
+      <Modal
+        visible={pickerOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setPickerOpen(false)}
+      >
+        <Pressable
+          style={styles.pickerBackdrop}
+          onPress={() => setPickerOpen(false)}
+        >
+          <Pressable
+            style={styles.pickerSheet}
+            onPress={(e) => e.stopPropagation()}
+          >
+            <Text style={styles.pickerEyebrow}>Contexto</Text>
+            <Text style={styles.pickerTitle}>Sobre que plano queres falar?</Text>
+
+            <View style={styles.pickerList}>
+              {availablePlans.map((p) => {
+                const isSelected = p.id === activePlanId;
+                return (
+                  <Pressable
+                    key={p.id}
+                    onPress={() => {
+                      Haptics.selectionAsync().catch(() => {});
+                      setActivePlanId(p.id);
+                      setPickerOpen(false);
+                    }}
+                    style={({ pressed }) => [
+                      styles.pickerOption,
+                      isSelected ? styles.pickerOptionSelected : null,
+                      pressed ? styles.pickerOptionPressed : null,
+                    ]}
+                  >
+                    <View style={styles.pickerOptionBody}>
+                      <Text
+                        style={[
+                          styles.pickerOptionTitle,
+                          isSelected ? styles.pickerOptionTitleSelected : null,
+                        ]}
+                        numberOfLines={2}
+                      >
+                        {p.prep_for}
+                      </Text>
+                    </View>
+                    {isSelected ? (
+                      <View style={styles.pickerOptionCheck}>
+                        <Check
+                          size={16}
+                          color={palette.white}
+                          weight="bold"
+                        />
+                      </View>
+                    ) : null}
+                  </Pressable>
+                );
+              })}
+            </View>
+
+            <Pressable
+              onPress={() => setPickerOpen(false)}
+              style={({ pressed }) => [
+                styles.pickerCancel,
+                pressed ? { opacity: 0.6 } : null,
+              ]}
+            >
+              <Text style={styles.pickerCancelText}>CANCELAR</Text>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -552,17 +684,20 @@ function TypingDots() {
 function TypingDot({ delay }: { delay: number }) {
   const v = useSharedValue(0.3);
   useEffect(() => {
-    const run = () => {
-      v.value = withTiming(1, { duration: 360, easing: Easing.inOut(Easing.quad) }, () => {
-        v.value = withTiming(0.3, { duration: 360, easing: Easing.inOut(Easing.quad) }, () => {
-          // self-restart — withRepeat would do this too but the explicit form
-          // makes the delay-on-first-frame easier to reason about.
-          run();
-        });
-      });
-    };
-    const id = setTimeout(run, delay);
-    return () => clearTimeout(id);
+    // Reanimated 4 strictly workletizes withTiming completion callbacks, so
+    // the previous self-restarting JS closure crashed with "run is not a
+    // function" on the UI thread. withRepeat(withSequence(...)) keeps the
+    // loop entirely in worklet land.
+    v.value = withDelay(
+      delay,
+      withRepeat(
+        withSequence(
+          withTiming(1, { duration: 360, easing: Easing.inOut(Easing.quad) }),
+          withTiming(0.3, { duration: 360, easing: Easing.inOut(Easing.quad) }),
+        ),
+        -1,
+      ),
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const style = useAnimatedStyle(() => ({
@@ -644,7 +779,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     paddingHorizontal: spacing.lg,
-    paddingTop: spacing.sm,
+    paddingTop: spacing.xl,
     paddingBottom: spacing.md,
     gap: spacing.sm,
   },
@@ -673,26 +808,48 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     borderRadius: 20,
   },
+  contextChipWrap: {
+    marginHorizontal: spacing.xl,
+    marginTop: spacing.sm,
+  },
   contextChip: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 6,
-    alignSelf: "flex-start",
-    marginHorizontal: spacing.xl,
-    marginTop: spacing.sm,
-    paddingHorizontal: spacing.md,
-    paddingVertical: 6,
+    gap: spacing.sm,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm + 2,
     backgroundColor: palette.primary[50],
     borderColor: palette.primary[200],
     borderWidth: 1,
     borderRadius: radii.pill,
-    maxWidth: "90%",
   },
-  contextChipText: {
+  contextChipPressed: {
+    backgroundColor: palette.primary[100],
+    borderColor: palette.primary[300],
+  },
+  contextChipBody: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "baseline",
+    gap: 6,
+  },
+  contextChipEyebrow: {
     fontFamily: fonts.bold,
     fontSize: 11,
-    color: palette.primary[700],
+    color: palette.primary[600],
     letterSpacing: 0.2,
+  },
+  contextChipText: {
+    flex: 1,
+    fontFamily: fonts.extrabold,
+    fontSize: 13,
+    color: palette.primary[700],
+  },
+  contextChipCaret: {
+    width: 20,
+    height: 20,
+    alignItems: "center",
+    justifyContent: "center",
   },
   scrollContent: {
     flexGrow: 1,
@@ -706,23 +863,13 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     paddingBottom: spacing.huge,
   },
-  welcomeEyebrow: {
-    ...t.eyebrow,
-  },
   welcomeTitle: {
     fontFamily: fonts.black,
     fontSize: 26,
     lineHeight: 32,
     color: colors.text,
     textAlign: "center",
-    marginTop: spacing.xs,
-  },
-  welcomeBody: {
-    ...t.bodyMuted,
-    textAlign: "center",
-    marginTop: spacing.sm,
     marginBottom: spacing.xxl,
-    maxWidth: 300,
   },
   suggestions: {
     alignSelf: "stretch",
@@ -924,22 +1071,15 @@ const styles = StyleSheet.create({
     minWidth: 44,
     textAlign: "right",
   },
-  stopBtn: {
+  // Non-interactive circle where the user's finger is during a hold. Same
+  // footprint as the old stop button so the recording pill stays balanced.
+  recordingMicIndicator: {
     width: 36,
     height: 36,
     borderRadius: 18,
     backgroundColor: palette.primary[500],
     alignItems: "center",
     justifyContent: "center",
-  },
-  // The square inside the round stop pill — the spec asked for a square stop
-  // icon inside a pill, so we draw a plain white rounded square rather than
-  // reaching for the Phosphor Stop glyph (cleaner edges at this size).
-  stopSquare: {
-    width: 12,
-    height: 12,
-    borderRadius: 2,
-    backgroundColor: palette.white,
   },
   // Overlays the idle pill: same edges so they morph cleanly via opacity.
   recordingPillAbsolute: {
@@ -949,16 +1089,88 @@ const styles = StyleSheet.create({
     top: 0,
     bottom: 0,
   },
-  cancelBtn: {
+  holdHint: {
     alignSelf: "center",
     marginTop: 6,
-    paddingHorizontal: spacing.md,
-    paddingVertical: 4,
-    borderRadius: radii.pill,
-  },
-  cancelBtnText: {
     fontFamily: fonts.bold,
     fontSize: 12,
+    color: palette.primary[600],
+  },
+
+  // Plan-context picker. Same backdrop + sheet pattern as the long-press
+  // action sheet on /plans so the affordances feel consistent.
+  pickerBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(15, 23, 42, 0.45)",
+    justifyContent: "center",
+    paddingHorizontal: spacing.xl,
+  },
+  pickerSheet: {
+    backgroundColor: palette.white,
+    borderRadius: radii.xl,
+    padding: spacing.xl,
+    gap: spacing.md,
+  },
+  pickerEyebrow: {
+    ...t.eyebrow,
+  },
+  pickerTitle: {
+    fontFamily: fonts.extrabold,
+    fontSize: 20,
+    lineHeight: 26,
+    color: colors.text,
+    marginBottom: spacing.sm,
+  },
+  pickerList: {
+    gap: spacing.sm,
+  },
+  pickerOption: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.md,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.md,
+    borderRadius: radii.md,
+    backgroundColor: palette.neutral[50],
+    borderWidth: 1,
+    borderColor: palette.neutral[100],
+  },
+  pickerOptionPressed: {
+    backgroundColor: palette.neutral[100],
+  },
+  pickerOptionSelected: {
+    backgroundColor: palette.primary[50],
+    borderColor: palette.primary[300],
+  },
+  pickerOptionBody: {
+    flex: 1,
+  },
+  pickerOptionTitle: {
+    fontFamily: fonts.extrabold,
+    fontSize: 15,
+    lineHeight: 20,
+    color: colors.text,
+  },
+  pickerOptionTitleSelected: {
+    color: palette.primary[700],
+  },
+  pickerOptionCheck: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: palette.primary[500],
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  pickerCancel: {
+    alignItems: "center",
+    paddingVertical: spacing.md,
+    marginTop: spacing.xs,
+  },
+  pickerCancelText: {
+    fontFamily: fonts.extrabold,
+    fontSize: 12,
+    letterSpacing: 1.8,
     color: palette.neutral[500],
   },
 });

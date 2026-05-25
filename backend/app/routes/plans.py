@@ -62,7 +62,7 @@ def _plan_row_to_out(
 
 
 @router.post("", response_model=PlanOut)
-async def create_plan(
+def create_plan(
     request: Request,
     device_id: str = Form(min_length=1),
     prep_for: str = Form(min_length=1),
@@ -83,9 +83,9 @@ async def create_plan(
     pdf_original_name: str | None = None
     if pdf is not None and pdf.filename:
         try:
-            pdf_bytes = await pdf.read()
+            pdf_bytes = pdf.file.read()
         finally:
-            await pdf.close()
+            pdf.file.close()
         if not pdf_bytes:
             pdf_bytes = None
         else:

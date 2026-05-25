@@ -52,10 +52,13 @@ create table sessions (
 );
 create index sessions_day_idx on sessions(plan_day_id, created_at desc);
 
--- Queued local notifications. The admin "Send" button inserts a row; the
--- mobile app polls /push/pending while foregrounded, presents each row as a
--- local notification, then acks (delete). No Expo Push API involved — this
--- pattern works under Expo Go (which dropped remote push in SDK 53+).
+-- Queued local notifications. Used as a fallback when a device has no
+-- registered Expo push token (i.e. the user is on Expo Go, on the simulator,
+-- or denied notification permissions). The admin "Send" button inserts a row;
+-- the mobile app polls /push/pending while foregrounded, presents each row as
+-- a local notification, then acks (delete). Dev builds with a registered
+-- Expo push token bypass this queue entirely — the backend hits Expo Push API
+-- directly.
 create table pending_pushes (
   id uuid primary key default gen_random_uuid(),
   device_id text not null,
@@ -64,6 +67,18 @@ create table pending_pushes (
   created_at timestamptz not null default now()
 );
 create index pending_pushes_device_idx on pending_pushes(device_id, created_at);
+
+-- Registered Expo push tokens (one per device). Populated by the mobile dev
+-- build on first launch via POST /push/register; upserted on every launch so
+-- token rotations (Expo can re-issue) are picked up automatically. Absence of
+-- a row for a device_id means "fall back to the pending_pushes polling
+-- queue".
+create table expo_push_tokens (
+  device_id text primary key,
+  token text not null,
+  platform text,
+  updated_at timestamptz not null default now()
+);
 
 -- Migration for existing installs (safe to re-run):
 -- alter table sessions add column if not exists audio_filename text;
@@ -79,4 +94,10 @@ create index pending_pushes_device_idx on pending_pushes(device_id, created_at);
 --   title text not null,
 --   body text not null,
 --   created_at timestamptz not null default now()
+-- );
+-- create table if not exists expo_push_tokens (
+--   device_id text primary key,
+--   token text not null,
+--   platform text,
+--   updated_at timestamptz not null default now()
 -- );

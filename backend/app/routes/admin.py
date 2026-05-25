@@ -1,8 +1,10 @@
+import httpx
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from ..db import get_supabase
+from .push import get_token_for, send_via_expo
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -62,9 +64,25 @@ class PushReq(BaseModel):
 
 @router.post("/push")
 def admin_push(req: PushReq) -> dict:
-    # Enqueue a local notification; the mobile app polls /push/pending while
-    # foregrounded and fires it via scheduleNotificationAsync. Works under
-    # Expo Go (no remote push needed).
+    # Two-mode delivery:
+    #  - If the device has a registered Expo push token (i.e. it's a dev build
+    #    that called POST /push/register), send directly via the Expo Push API.
+    #    This works in background and when the app is killed.
+    #  - Otherwise insert into pending_pushes so the foreground polling loop
+    #    (Expo Go / simulators) picks it up. Expo Push API errors also fall
+    #    back to the queue so a transient network blip doesn't drop the push.
+    token = get_token_for(req.device_id)
+    if token:
+        try:
+            result = send_via_expo(token, req.title, req.body)
+            return {"ok": True, "mode": "expo_push", "result": result}
+        except httpx.HTTPError as exc:
+            # Fall through to the queue. Log via the response so the admin UI
+            # surfaces it.
+            fallback_reason = f"expo push failed: {exc}"
+    else:
+        fallback_reason = None
+
     sb = get_supabase()
     inserted = (
         sb.table("pending_pushes")
@@ -74,7 +92,12 @@ def admin_push(req: PushReq) -> dict:
         .execute()
         .data
     )
-    return {"ok": True, "queued": inserted[0] if inserted else None}
+    return {
+        "ok": True,
+        "mode": "pending_queue",
+        "fallback_reason": fallback_reason,
+        "queued": inserted[0] if inserted else None,
+    }
 
 
 _ADMIN_HTML = """<!doctype html>
@@ -309,7 +332,16 @@ async function postPush(payload) {
     const txt = await r.text();
     if (r.ok) {
       status.className = "status ok";
-      status.textContent = "queued (appears on device once it polls, ≤5s if foregrounded)";
+      let mode = "queued";
+      let body = null;
+      try { body = JSON.parse(txt); mode = body.mode || mode; } catch {}
+      if (mode === "expo_push") {
+        status.textContent = "sent via Expo Push API (background/killed-app delivery)";
+      } else {
+        let suffix = "";
+        if (body && body.fallback_reason) suffix = " · fallback: " + body.fallback_reason;
+        status.textContent = "queued (polled by foregrounded app, ≤5s)" + suffix;
+      }
       // Reload so the operator sees the row in pending_pushes, then watches it disappear after ack.
       loadData();
     } else {

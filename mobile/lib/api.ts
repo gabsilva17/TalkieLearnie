@@ -314,6 +314,19 @@ export const api = {
     await jsonOrThrow(res);
   },
 
+  async registerPushToken(input: {
+    device_id: string;
+    token: string;
+    platform: string;
+  }): Promise<void> {
+    const res = await fetch(`${API_URL}/push/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    await jsonOrThrow(res);
+  },
+
   async ask(input: {
     device_id: string;
     plan_id?: string | null;

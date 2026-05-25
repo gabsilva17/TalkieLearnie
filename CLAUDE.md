@@ -26,7 +26,10 @@ talk over HTTP.
 
 - **Mobile**: Expo SDK 54 (managed), TypeScript, expo-router (file-based,
   routes in `mobile/app/`). Scaffolded with `npx create-expo-app@latest --template default@sdk-54`.
-  SDK 54 is supported by Expo Go on physical Android — no dev-client build needed.
+  SDK 54 is supported by Expo Go on physical Android, so day-to-day dev runs
+  there. For **real remote push notifications** (delivery in background or
+  with the app killed) we have a dev-build path via EAS — see "Android dev
+  build" in the Running locally section. `expo-dev-client` is installed.
   Authoritative version reference: https://docs.expo.dev/versions/v54.0.0/
 - **Backend**: FastAPI, Python 3.11+, `uv` for dep management (`uv sync`, `uv run`).
 - **LLMs**: Anthropic Claude — Haiku 4.5 (`claude-haiku-4-5-20251001`) for plan
@@ -132,16 +135,30 @@ Backend endpoints (`backend/app/routes/`):
   catalog, derived). All values are computed on the fly in
   `backend/app/services/profile.py` — **no extra tables**.
 - `GET /push/pending?device_id=…` / `POST /push/pending/{id}/ack` — queue +
-  ack endpoints used by the mobile poll loop. The admin "Send" button inserts
-  into `pending_pushes`; the mobile app polls every 5s while foregrounded
-  (`mobile/lib/push.ts` → `startPushPolling`) and presents each row as a
-  **local** notification via `Notifications.scheduleNotificationAsync({ trigger: null })`,
-  then acks it. This is deliberate — Expo Go SDK 53+ dropped remote push, so
-  we can't hit Expo's Push API until we cut a dev build. Pattern works in
-  Expo Go but only while the app is foregrounded.
-- `POST /admin/push` — `{device_id, title, body}`. Enqueues a row in
-  `pending_pushes`. Driven by the "Send daily reminder" button on `GET /admin`
-  (rotates through pt-PT Duolingo-style presets).
+  ack endpoints used by the mobile poll loop. **Fallback path only**, taken
+  when a device has no registered Expo push token (Expo Go on SDK 53+,
+  simulator, denied permissions). The mobile app polls every 5s while
+  foregrounded (`mobile/lib/push.ts` → `startPushPolling`) and presents each
+  row as a **local** notification via
+  `Notifications.scheduleNotificationAsync({ trigger: null })`, then acks it.
+  Dev builds with a registered token never start this loop.
+- `POST /push/register` — `{device_id, token, platform?}`. Upserts an Expo
+  push token for the device into `expo_push_tokens`. Called by the mobile
+  dev build on boot via `getExpoPushTokenAsync({ projectId })`. Once a row
+  exists, `POST /admin/push` routes via the Expo Push API instead of the
+  polling queue. Expo can rotate tokens, so this endpoint is called on
+  **every launch** (the upsert is cheap; latest write wins).
+- `DELETE /push/register?device_id=…` — removes a token. Useful when
+  swapping a device between Expo Go and a dev build during demos.
+- `POST /admin/push` — `{device_id, title, body}`. Two-mode delivery: if the
+  device has a row in `expo_push_tokens`, sends via
+  `https://exp.host/--/api/v2/push/send` (background + killed-app delivery
+  on dev/standalone builds). Otherwise inserts into `pending_pushes` for the
+  foreground polling fallback. Expo Push API errors also fall back to the
+  queue so a transient blip doesn't drop the notification. Response shape
+  includes `mode: "expo_push" | "pending_queue"` so the admin UI tells the
+  operator which path was taken. Driven by the "Send daily reminder" button
+  on `GET /admin` (rotates through pt-PT Duolingo-style presets).
 - `POST /ask` — Claude Haiku 4.5 chat helper backing the "Perguntar" tab.
   Body: `{device_id, plan_id?, messages: [{role: "user"|"assistant", content}]}`.
   Last message must be `role=user`. When `plan_id` is provided it's verified to
@@ -588,14 +605,15 @@ Required env in `backend/.env` (copy from `.env.example`):
 `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `SUPABASE_URL`, `SUPABASE_KEY` (anon key).
 
 Before the first request: run `backend/schema.sql` in the Supabase SQL editor.
-Four tables: `plans`, `plan_days`, `sessions`, `pending_pushes`. If you
-already have older tables, run the `alter table … add column if not exists …`
-and `create table if not exists pending_pushes …` statements at the bottom of
-`schema.sql` (those also drop the obsolete `push_tokens` table from the
-earlier Expo Push API attempt, add the `plans.extra_text`,
-`plans.extra_pdf_filename`, `plans.focus_mode` columns added for the
-optional onboarding context step, and the `plans.name` column for the
-AI-generated short display title shown on the plans list card).
+Five tables: `plans`, `plan_days`, `sessions`, `pending_pushes`,
+`expo_push_tokens`. If you already have older tables, run the
+`alter table … add column if not exists …` and `create table if not exists …`
+statements at the bottom of `schema.sql` (those also drop the obsolete
+`push_tokens` table from an earlier abandoned attempt, add the
+`plans.extra_text` / `plans.extra_pdf_filename` / `plans.focus_mode` columns
+for the optional onboarding context step, the `plans.name` column for the
+AI-generated short display title, and the `expo_push_tokens` table for the
+dev-build remote-push path).
 
 Mobile:
 ```bash
@@ -609,6 +627,37 @@ time the laptop switches WiFi networks, its LAN IP can change** — update
 bundle (`EXPO_PUBLIC_*` is inlined at bundle time, a reload alone is not
 enough). On Windows: `Get-NetIPAddress -AddressFamily IPv4` (filter out
 `127.*`, `169.254.*`) finds the current LAN IP.
+
+### Android dev build (real remote push)
+
+Expo Go on SDK 53+ dropped remote push, so the `expo-notifications` background
+delivery path needs a custom dev build. The flow is one-time setup plus a
+cloud build per machine; subsequent JS work still runs through `expo start`.
+
+```powershell
+cd mobile
+eas login                                          # first time only
+eas build --platform android --profile development # ~15-20 min on EAS cloud
+```
+
+`mobile/eas.json` defines three profiles:
+- `development` — APK, `developmentClient: true`, internal distribution. This
+  is the build you install on your phone for daily dev work.
+- `preview` — APK, no dev client. Closest thing to a release build for
+  sharing the demo with someone who isn't running Metro.
+- `production` — AAB for Play Store submission (not used yet).
+
+When the build finishes, EAS prints a URL. Open it on the phone, install the
+APK, then run `npx expo start --dev-client` on the laptop. The dev build
+connects to Metro just like Expo Go did. To open the dev menu shake the
+phone or run `adb shell input keyevent 82`.
+
+The dev build registers an Expo push token on first launch
+(`mobile/lib/push.ts` → `getExpoPushTokenAsync({ projectId })`) and POSTs it
+to `/push/register`. From then on, `POST /admin/push` for that device routes
+via Expo Push API (background + killed-app delivery). Expo Go installs stay
+on the polling fallback automatically — same device, two different
+`device_id`s in AsyncStorage so no token collision.
 
 ## Conventions
 

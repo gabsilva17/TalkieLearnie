@@ -20,7 +20,13 @@
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
-      "package": "com.dotponto.coachmobile"
+      "package": "com.dotponto.coachmobile",
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
+      ]
     },
     "androidStatusBar": {
       "backgroundColor": "#FFFFFF",
@@ -58,7 +64,8 @@
           "defaultChannel": "default"
         }
       ],
-      "@react-native-community/datetimepicker"
+      "@react-native-community/datetimepicker",
+      "expo-asset"
     ],
     "experiments": {
       "typedRoutes": false,
@@ -69,6 +76,12 @@
       "eas": {
         "projectId": "f2f8f505-dd11-4cce-9697-9bf8ab082b1d"
       }
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/f2f8f505-dd11-4cce-9697-9bf8ab082b1d"
     }
   }
 }

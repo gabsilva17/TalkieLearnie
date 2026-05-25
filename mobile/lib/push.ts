@@ -1,3 +1,4 @@
+import Constants from "expo-constants";
 import * as Notifications from "expo-notifications";
 import { AppState, AppStateStatus, Platform } from "react-native";
 
@@ -17,6 +18,10 @@ Notifications.setNotificationHandler({
 const POLL_INTERVAL_MS = 5000;
 let permissionAsked = false;
 
+// Expo Go (SDK 53+) cannot receive remote push. We detect it via
+// `Constants.appOwnership === 'expo'`; dev builds and standalone are `null`.
+const IS_EXPO_GO = Constants.appOwnership === "expo";
+
 async function ensurePermission(): Promise<boolean> {
   if (Platform.OS === "android") {
     await Notifications.setNotificationChannelAsync("default", {
@@ -32,6 +37,35 @@ async function ensurePermission(): Promise<boolean> {
   permissionAsked = true;
   const req = await Notifications.requestPermissionsAsync();
   return req.status === "granted";
+}
+
+async function registerExpoPushToken(deviceId: string): Promise<boolean> {
+  // Expo Go on SDK 53+ cannot mint a push token — calling this would throw.
+  // Bail early so the caller can start the polling fallback.
+  if (IS_EXPO_GO) return false;
+
+  const projectId =
+    Constants.expoConfig?.extra?.eas?.projectId ??
+    (Constants.easConfig as { projectId?: string } | undefined)?.projectId;
+  if (!projectId) {
+    if (__DEV__) console.warn("no eas projectId in app config; skipping push token");
+    return false;
+  }
+
+  try {
+    const { data: token } = await Notifications.getExpoPushTokenAsync({ projectId });
+    if (!token) return false;
+    await api.registerPushToken({
+      device_id: deviceId,
+      token,
+      platform: Platform.OS,
+    });
+    if (__DEV__) console.log("expo push token registered:", token);
+    return true;
+  } catch (err) {
+    if (__DEV__) console.warn("expo push token registration failed", err);
+    return false;
+  }
 }
 
 async function drainPending(deviceId: string) {
@@ -87,17 +121,30 @@ export function startPushPolling(deviceId: string): () => void {
     else stop();
   };
 
+  let sub: { remove: () => void } | null = null;
+
   (async () => {
     const granted = await ensurePermission();
     if (!granted || cancelled) return;
-    if (AppState.currentState === "active") start();
-  })();
 
-  const sub = AppState.addEventListener("change", onAppStateChange);
+    // Try real push first. On dev builds + standalone this registers an Expo
+    // push token with the backend, and the admin/push endpoint will route
+    // notifications through Expo Push API directly (background + killed-app
+    // delivery). If we register successfully, the foreground polling loop
+    // would double-fire on the same device, so we skip it.
+    const registered = await registerExpoPushToken(deviceId);
+    if (cancelled) return;
+    if (registered) return;
+
+    // Fallback: Expo Go / simulators / failed token mint. Polling drives
+    // local notifications while foregrounded.
+    if (AppState.currentState === "active") start();
+    sub = AppState.addEventListener("change", onAppStateChange);
+  })();
 
   return () => {
     cancelled = true;
     stop();
-    sub.remove();
+    sub?.remove();
   };
 }

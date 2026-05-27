@@ -4,6 +4,8 @@ import {
   enqueueAchievements,
   setAchievementsResultScreenActive,
 } from "@/lib/achievementsQueue";
+import { translate } from "@/lib/i18n";
+import { peekLanguage } from "@/lib/locale";
 import { setPendingPlanCompleted } from "@/lib/planCompletionQueue";
 import { setPendingStreakUnlock } from "@/lib/streakCelebration";
 
@@ -20,6 +22,8 @@ export type PlanDay = {
 
 export type FocusMode = "communication" | "technical" | "both";
 
+export type Language = "pt" | "en";
+
 export type Plan = {
   id: string;
   prep_for: string;
@@ -31,6 +35,10 @@ export type Plan = {
   extra_text: string | null;
   extra_pdf_url: string | null;
   focus_mode: FocusMode | null;
+  // Language the plan was created in. Used to thread the right `lang` into
+  // POST /sessions, /reanalyze, /motivation, and /ask when this plan is the
+  // active context.
+  language: Language;
   created_at: string;
   days: PlanDay[];
 };
@@ -143,6 +151,7 @@ export const api = {
     focus_mode?: FocusMode | null;
     pdf_uri?: string | null;
     pdf_name?: string | null;
+    language?: Language;
   }): Promise<Plan> {
     // Always multipart — the backend accepts the file as optional. We use
     // FileSystem.uploadAsync (legacy) for the same reason POST /sessions does:
@@ -155,6 +164,7 @@ export const api = {
       prep_for: input.prep_for,
       target_date: input.target_date,
       audience_info: input.audience_info,
+      language: input.language ?? peekLanguage(),
     };
     if (input.extra_text) fields.extra_text = input.extra_text;
     if (input.focus_mode) fields.focus_mode = input.focus_mode;
@@ -277,11 +287,12 @@ export const api = {
 
   async getProfile(device_id: string): Promise<Profile> {
     const tz = -new Date().getTimezoneOffset();
+    const lang = peekLanguage();
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 8000);
     try {
       const res = await fetch(
-        `${API_URL}/profile?device_id=${encodeURIComponent(device_id)}&tz_offset_minutes=${tz}`,
+        `${API_URL}/profile?device_id=${encodeURIComponent(device_id)}&tz_offset_minutes=${tz}&lang=${lang}`,
         { signal: ctrl.signal },
       );
       return jsonOrThrow(res);
@@ -331,6 +342,9 @@ export const api = {
     device_id: string;
     plan_id?: string | null;
     messages: { role: "user" | "assistant"; content: string }[];
+    // Optional — defaults to the current device language. When `plan_id` is
+    // set the backend ignores this and uses the plan's stored language.
+    lang?: Language;
   }): Promise<{ reply: string }> {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 20000);
@@ -342,6 +356,7 @@ export const api = {
           device_id: input.device_id,
           plan_id: input.plan_id ?? null,
           messages: input.messages,
+          lang: input.lang ?? peekLanguage(),
         }),
         signal: ctrl.signal,
       });
@@ -354,8 +369,16 @@ export const api = {
   async getMotivation(input: {
     device_id: string;
     plan_id: string;
+    // The plan's own language. Server falls back to the plan's stored
+    // language if omitted; passing it explicitly lets the celebration copy
+    // arrive in the right language even if the column was somehow missed.
+    lang?: Language;
   }): Promise<string> {
-    const FALLBACK = "Estás um passo mais perto. Mais um treino feito.";
+    // Fallback strings live in the i18n dictionary; pick the right one for
+    // the requested (or current) language so the celebration doesn't switch
+    // languages mid-flow when the network fails.
+    const lang: Language = input.lang ?? peekLanguage();
+    const fallback = translate(lang, "session.motivation_fetch_fallback");
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 8000);
     try {
@@ -365,15 +388,16 @@ export const api = {
         body: JSON.stringify({
           device_id: input.device_id,
           plan_id: input.plan_id,
+          lang,
         }),
         signal: ctrl.signal,
       });
-      if (!res.ok) return FALLBACK;
+      if (!res.ok) return fallback;
       const body = (await res.json()) as { message?: string };
       const msg = (body.message ?? "").trim();
-      return msg || FALLBACK;
+      return msg || fallback;
     } catch {
-      return FALLBACK;
+      return fallback;
     } finally {
       clearTimeout(t);
     }
@@ -382,6 +406,7 @@ export const api = {
   async transcribeAsk(input: {
     device_id: string;
     audio_uri: string;
+    lang?: Language;
   }): Promise<{ text: string }> {
     const result = await FileSystem.uploadAsync(
       `${API_URL}/ask/transcribe`,
@@ -391,7 +416,10 @@ export const api = {
         uploadType: FileSystem.FileSystemUploadType.MULTIPART,
         fieldName: "audio",
         mimeType: "audio/m4a",
-        parameters: { device_id: input.device_id },
+        parameters: {
+          device_id: input.device_id,
+          lang: input.lang ?? peekLanguage(),
+        },
       },
     );
     if (result.status >= 400) {

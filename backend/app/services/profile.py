@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
+
+Language = Literal["pt", "en"]
 
 
 def _to_utc(dt_raw: Any) -> datetime:
@@ -63,7 +65,7 @@ def _best_streak(active_days: set[date]) -> int:
     return best
 
 
-_ACHIEVEMENT_CATALOG: list[dict[str, str]] = [
+_ACHIEVEMENT_CATALOG_PT: list[dict[str, str]] = [
     {"id": "first_session", "label": "Primeira sessão", "description": "Grava a tua primeira resposta."},
     {"id": "streak_3", "label": "3 dias seguidos", "description": "Mantém o streak por 3 dias."},
     {"id": "streak_7", "label": "Semana perfeita", "description": "7 dias seguidos a treinar."},
@@ -78,12 +80,32 @@ _ACHIEVEMENT_CATALOG: list[dict[str, str]] = [
     {"id": "multi_plan", "label": "Dois planos", "description": "Cria mais do que um plano."},
 ]
 
+_ACHIEVEMENT_CATALOG_EN: list[dict[str, str]] = [
+    {"id": "first_session", "label": "First session", "description": "Record your first answer."},
+    {"id": "streak_3", "label": "3 days in a row", "description": "Keep the streak for 3 days."},
+    {"id": "streak_7", "label": "Perfect week", "description": "Train 7 days in a row."},
+    {"id": "streak_14", "label": "Two weeks straight", "description": "14 days in a row. Endurance!"},
+    {"id": "sessions_10", "label": "10 sessions", "description": "Complete 10 sessions total."},
+    {"id": "sessions_25", "label": "25 sessions", "description": "Complete 25 sessions. Veteran."},
+    {"id": "minutes_10", "label": "10 minutes spoken", "description": "Reach 10 minutes of audio."},
+    {"id": "minutes_30", "label": "30 minutes spoken", "description": "Reach 30 minutes of audio."},
+    {"id": "rating_8", "label": "Rating 8+", "description": "Reach a rating of 8 or higher."},
+    {"id": "rating_9", "label": "Almost perfect", "description": "Reach a rating of 9 or higher."},
+    {"id": "low_fillers", "label": "Clean speech", "description": "Fewer than 3 fillers in a session."},
+    {"id": "multi_plan", "label": "Two plans", "description": "Create more than one plan."},
+]
+
+
+def _catalog(lang: Language) -> list[dict[str, str]]:
+    return _ACHIEVEMENT_CATALOG_EN if lang == "en" else _ACHIEVEMENT_CATALOG_PT
+
 
 def _compute_achievements(
     sessions: list[dict],
     plans_count: int,
     total_minutes: float,
     streak_best: int,
+    lang: Language = "pt",
 ) -> list[dict]:
     earned: dict[str, datetime | None] = {}
 
@@ -119,7 +141,7 @@ def _compute_achievements(
         earned["multi_plan"] = None
 
     out: list[dict] = []
-    for item in _ACHIEVEMENT_CATALOG:
+    for item in _catalog(lang):
         aid = item["id"]
         out.append(
             {
@@ -138,6 +160,7 @@ def build_profile(
     plans_count: int,
     tz_offset_minutes: int,
     now_utc: datetime | None = None,
+    lang: Language = "pt",
 ) -> dict:
     """Sessions are expected to be ordered oldest → newest."""
     sessions = sorted(sessions, key=lambda r: _to_utc(r["created_at"]))
@@ -197,7 +220,9 @@ def build_profile(
             }
         )
 
-    achievements = _compute_achievements(sessions, plans_count, total_minutes, streak_best)
+    achievements = _compute_achievements(
+        sessions, plans_count, total_minutes, streak_best, lang=lang
+    )
 
     return {
         "streak_current": streak_current,

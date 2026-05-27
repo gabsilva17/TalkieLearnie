@@ -1,7 +1,13 @@
 from datetime import date, datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
+
+# pt-PT remains the default for any plan / call that doesn't specify a
+# language. Legacy rows created before the column existed are treated as 'pt'
+# at the SQL level (default 'pt' not null).
+Language = Literal["pt", "en"]
 
 
 class RenamePlanReq(BaseModel):
@@ -32,6 +38,11 @@ class PlanOut(BaseModel):
     extra_text: str | None = None
     extra_pdf_url: str | None = None
     focus_mode: str | None = None
+    # Language the plan was created in. Every downstream LLM call (analyze,
+    # motivation, ask-with-plan-context, Whisper) must use this language, not
+    # the device's current toggle, so a pt-PT plan keeps producing pt-PT
+    # feedback even after the user flips the UI to English.
+    language: Language = "pt"
     created_at: datetime
     days: list[PlanDayOut]
 
@@ -124,6 +135,10 @@ class AskMessage(BaseModel):
 class AskReq(BaseModel):
     device_id: str = Field(min_length=1)
     plan_id: UUID | None = None
+    # Mobile default. When `plan_id` is provided the server overrides this
+    # with the plan's persisted language so the assistant stays consistent
+    # with the rest of that plan's content.
+    lang: Language = "pt"
     messages: list[AskMessage] = Field(min_length=1, max_length=20)
 
 
@@ -138,6 +153,10 @@ class AskTranscribeResp(BaseModel):
 class MotivationReq(BaseModel):
     device_id: str = Field(min_length=1)
     plan_id: UUID
+    # Optional; the server falls back to the plan's stored language when
+    # absent. The mobile client passes the plan's language so the celebration
+    # always renders in the plan's language.
+    lang: Language | None = None
 
 
 class MotivationResp(BaseModel):

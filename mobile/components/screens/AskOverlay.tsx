@@ -57,6 +57,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { PressableScale } from "@/components/ui/PressableScale";
 import { Plan, api } from "@/lib/api";
 import { getDeviceId } from "@/lib/deviceId";
+import { useT } from "@/lib/i18n";
 import { getLastPlanId } from "@/lib/lastPlan";
 import {
   colors,
@@ -68,11 +69,6 @@ import {
 } from "@/lib/theme";
 
 type ChatMessage = { role: "user" | "assistant"; content: string };
-
-const SUGGESTIONS = [
-  "Como começo um pitch forte?",
-  "Dicas para controlar os nervos.",
-];
 
 // Voice dictation cap. Ask questions tend to be short; 2 min is generous and
 // matches the implicit ceiling on `AskMessage.content` (4000 chars).
@@ -90,6 +86,8 @@ function formatMmSs(totalSeconds: number): string {
 }
 
 export function AskOverlay({ onClose }: { onClose: () => void }) {
+  const { t: tr } = useT();
+  const SUGGESTIONS = [tr("ask.suggestions_1"), tr("ask.suggestions_2")];
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -267,8 +265,8 @@ export function AskOverlay({ onClose }: { onClose: () => void }) {
     if (!granted) {
       recordingIntentRef.current = false;
       Alert.alert(
-        "Microfone",
-        "Precisamos de permissão de microfone para ditar a pergunta.",
+        tr("ask.mic_permission_title"),
+        tr("ask.mic_permission_body"),
       );
       return;
     }
@@ -359,7 +357,7 @@ export function AskOverlay({ onClose }: { onClose: () => void }) {
       const res = await api.transcribeAsk({ device_id: deviceId, audio_uri: uri });
       const text = (res.text || "").trim();
       if (!text) {
-        setError("Não consegui ouvir nada. Tenta de novo num sítio mais calmo.");
+        setError(tr("ask.error_no_speech"));
       } else {
         setInput((prev) => (prev.trim().length > 0 ? `${prev.trim()} ${text}` : text));
       }
@@ -375,7 +373,7 @@ export function AskOverlay({ onClose }: { onClose: () => void }) {
       <View style={styles.header}>
         <View style={styles.headerSlot} />
         <View style={styles.headerCenter}>
-          <Text style={styles.headerTitle}>Perguntar</Text>
+          <Text style={styles.headerTitle}>{tr("ask.title")}</Text>
         </View>
         <View style={styles.headerActions}>
           {messages.length > 0 ? (
@@ -386,7 +384,7 @@ export function AskOverlay({ onClose }: { onClose: () => void }) {
                 styles.headerIconBtn,
                 pressed ? { backgroundColor: palette.neutral[100] } : null,
               ]}
-              accessibilityLabel="Nova conversa"
+              accessibilityLabel={tr("ask.new_conversation_a11y")}
             >
               <ArrowClockwise size={20} color={palette.neutral[600]} weight="bold" />
             </Pressable>
@@ -395,7 +393,7 @@ export function AskOverlay({ onClose }: { onClose: () => void }) {
             hitSlop={12}
             onPress={onClose}
             accessibilityRole="button"
-            accessibilityLabel="Fechar"
+            accessibilityLabel={tr("a11y.close")}
           >
             <View style={styles.headerIconBtn}>
               <X size={24} color={palette.neutral[700]} weight="regular" />
@@ -422,12 +420,12 @@ export function AskOverlay({ onClose }: { onClose: () => void }) {
             accessibilityRole={availablePlans.length > 1 ? "button" : "text"}
             accessibilityLabel={
               availablePlans.length > 1
-                ? `Contexto: ${activePlan.prep_for}. Toca para trocar de plano.`
-                : `Contexto: ${activePlan.prep_for}`
+                ? tr("ask.context_a11y_switch", { plan: activePlan.prep_for })
+                : tr("ask.context_a11y_only", { plan: activePlan.prep_for })
             }
           >
             <View style={styles.contextChipBody}>
-              <Text style={styles.contextChipEyebrow}>Contexto</Text>
+              <Text style={styles.contextChipEyebrow}>{tr("ask.context_label")}</Text>
               <Text style={styles.contextChipText} numberOfLines={1}>
                 {activePlan.prep_for}
               </Text>
@@ -459,7 +457,7 @@ export function AskOverlay({ onClose }: { onClose: () => void }) {
         >
           {messages.length === 0 ? (
             <Animated.View entering={FadeIn.duration(220)} style={styles.welcome}>
-              <Text style={styles.welcomeTitle}>Em que te posso ajudar?</Text>
+              <Text style={styles.welcomeTitle}>{tr("ask.welcome_title")}</Text>
               <View style={styles.suggestions}>
                 {SUGGESTIONS.map((s, i) => (
                   <Animated.View
@@ -527,8 +525,8 @@ export function AskOverlay({ onClose }: { onClose: () => void }) {
                 onChangeText={setInput}
                 placeholder={
                   transcribing
-                    ? "A transcrever…"
-                    : "Escreve ou dita a tua pergunta…"
+                    ? tr("ask.composer_transcribing")
+                    : tr("ask.composer_placeholder")
                 }
                 placeholderTextColor={palette.neutral[400]}
                 style={styles.composerInputInner}
@@ -555,7 +553,7 @@ export function AskOverlay({ onClose }: { onClose: () => void }) {
                         pressed ? styles.micBtnPressed : null,
                         loading ? styles.micBtnDisabled : null,
                       ]}
-                      accessibilityLabel="Manter premido para ditar a pergunta"
+                      accessibilityLabel={tr("ask.composer_mic_a11y")}
                     >
                       <Microphone size={18} color={palette.primary[600]} weight="bold" />
                     </Pressable>
@@ -574,7 +572,7 @@ export function AskOverlay({ onClose }: { onClose: () => void }) {
                         ? { backgroundColor: palette.primary[700] }
                         : null,
                     ]}
-                    accessibilityLabel="Enviar pergunta"
+                    accessibilityLabel={tr("ask.composer_send_a11y")}
                   >
                     {loading || transcribing ? (
                       <ActivityIndicator color={palette.white} size="small" />
@@ -603,7 +601,7 @@ export function AskOverlay({ onClose }: { onClose: () => void }) {
 
           {composerMode === "recording" ? (
             <Animated.View entering={FadeIn.duration(200).delay(120)}>
-              <Text style={styles.holdHint}>Solta para enviar</Text>
+              <Text style={styles.holdHint}>{tr("ask.composer_hold_hint")}</Text>
             </Animated.View>
           ) : null}
         </View>
@@ -623,8 +621,8 @@ export function AskOverlay({ onClose }: { onClose: () => void }) {
             style={styles.pickerSheet}
             onPress={(e) => e.stopPropagation()}
           >
-            <Text style={styles.pickerEyebrow}>Contexto</Text>
-            <Text style={styles.pickerTitle}>Sobre que plano queres falar?</Text>
+            <Text style={styles.pickerEyebrow}>{tr("ask.picker_eyebrow")}</Text>
+            <Text style={styles.pickerTitle}>{tr("ask.picker_title")}</Text>
 
             <View style={styles.pickerList}>
               {availablePlans.map((p) => {
@@ -675,7 +673,7 @@ export function AskOverlay({ onClose }: { onClose: () => void }) {
                 pressed ? { opacity: 0.6 } : null,
               ]}
             >
-              <Text style={styles.pickerCancelText}>CANCELAR</Text>
+              <Text style={styles.pickerCancelText}>{tr("common.cancel_caps")}</Text>
             </Pressable>
           </Pressable>
         </Pressable>

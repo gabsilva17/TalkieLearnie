@@ -16,6 +16,7 @@ import Animated, {
 } from "react-native-reanimated";
 
 import { PressableScale } from "@/components/ui/PressableScale";
+import { useT } from "@/lib/i18n";
 import { colors, fonts, palette, radii, spacing, type as t } from "@/lib/theme";
 
 export type DayCardStatus = "done" | "current" | "locked";
@@ -37,6 +38,7 @@ export function DayCard({
   status,
   onPress,
 }: DayCardProps) {
+  const { t: tr } = useT();
   const isLocked = status === "locked";
   const isCurrent = status === "current";
   const isDone = status === "done";
@@ -106,7 +108,7 @@ export function DayCard({
               isCurrent ? styles.eyebrowCurrent : null,
               isLocked ? styles.eyebrowLocked : null,
             ]}
-          >{`Dia ${index}`}</Text>
+          >{tr("common.day_label", { index })}</Text>
           <Text
             style={[styles.title, isLocked ? styles.titleLocked : null]}
             numberOfLines={1}

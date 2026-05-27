@@ -42,6 +42,7 @@ import {
   flushPendingAchievements,
   setAchievementsResultScreenActive,
 } from "@/lib/achievementsQueue";
+import { useT } from "@/lib/i18n";
 import { flushPendingPlanCompleted } from "@/lib/planCompletionQueue";
 import { FillerHit, SessionResult, api } from "@/lib/api";
 import {
@@ -67,30 +68,32 @@ function pacingIsGood(v: number): boolean {
   return v >= 0.15 && v <= 0.35;
 }
 
-function wpmLabel(wpm: number): string {
-  if (wpm < 90) return "Muito lento";
-  if (wpm < 120) return "Lento";
-  if (wpm <= 160) return "Ideal";
-  if (wpm <= 200) return "Rápido";
-  return "Atropelado";
+type TFn = (key: string, vars?: Record<string, string | number>) => string;
+
+function wpmLabel(wpm: number, tr: TFn): string {
+  if (wpm < 90) return tr("result.wpm_band_very_slow");
+  if (wpm < 120) return tr("result.wpm_band_slow");
+  if (wpm <= 160) return tr("result.wpm_band_ideal");
+  if (wpm <= 200) return tr("result.wpm_band_fast");
+  return tr("result.wpm_band_too_fast");
 }
 
-function fillerLabel(count: number): string {
-  if (count === 0) return "Perfeito";
-  if (count <= 3) return "Aceitável";
-  return "A reduzir";
+function fillerLabel(count: number, tr: TFn): string {
+  if (count === 0) return tr("result.filler_band_perfect");
+  if (count <= 3) return tr("result.filler_band_ok");
+  return tr("result.filler_band_reduce");
 }
 
-function pacingLabel(v: number): string {
-  if (v < 0.15) return "Monotónico";
-  if (v <= 0.35) return "Saudável";
-  return "Errático";
+function pacingLabel(v: number, tr: TFn): string {
+  if (v < 0.15) return tr("result.pace_band_monotone");
+  if (v <= 0.35) return tr("result.pace_band_healthy");
+  return tr("result.pace_band_erratic");
 }
 
-function motivationalMessage(rating: number): string {
-  if (rating >= 8) return "Excelente. Continua assim.";
-  if (rating >= 5) return "Bom progresso. Estás no caminho certo.";
-  return "Vamos treinar mais. Cada tentativa conta.";
+function motivationalMessage(rating: number, tr: TFn): string {
+  if (rating >= 8) return tr("result.motivation_high");
+  if (rating >= 5) return tr("result.motivation_mid");
+  return tr("result.motivation_low");
 }
 
 const TOTAL_PAGES = 6;
@@ -106,6 +109,7 @@ type SeekRequest = { time: number; n: number };
 
 export default function SessionResultScreen() {
   const router = useRouter();
+  const { t: tr } = useT();
   const { dayId, result } = useLocalSearchParams<{ dayId: string; result?: string }>();
 
   const inlineData = useMemo<SessionResult | null>(() => {
@@ -150,7 +154,7 @@ export default function SessionResultScreen() {
         const s = await api.getSessionForDay(dayId);
         if (cancelled) return;
         if (!s) {
-          setFetchError("Ainda não há resultado para este dia.");
+          setFetchError(tr("result.no_result"));
         } else {
           setFetched(s);
         }
@@ -163,7 +167,7 @@ export default function SessionResultScreen() {
     return () => {
       cancelled = true;
     };
-  }, [inlineData, dayId]);
+  }, [inlineData, dayId, tr]);
 
   const data = inlineData ?? fetched;
 
@@ -184,9 +188,9 @@ export default function SessionResultScreen() {
     return (
       <SafeAreaView style={styles.safe}>
         <View style={styles.center}>
-          <Text style={styles.errorText}>{fetchError ?? "Resultado indisponível."}</Text>
+          <Text style={styles.errorText}>{fetchError ?? tr("result.unavailable")}</Text>
           <DuoButton
-            title="VOLTAR AO PLANO"
+            title={tr("result.cta_back_to_plan_caps")}
             variant="secondary"
             onPress={() => router.replace("/")}
             fullWidth={false}
@@ -219,12 +223,12 @@ export default function SessionResultScreen() {
   const footer = (
     <View style={styles.footerStack}>
       <DuoButton
-        title="VOLTAR AO PLANO"
+        title={tr("result.cta_back_to_plan_caps")}
         variant="primary"
         onPress={() => router.replace("/")}
       />
       <DuoButton
-        title="REPETIR PARA MELHORAR"
+        title={tr("result.cta_retry_better_caps")}
         iconRight={ArrowClockwise}
         variant="secondary"
         onPress={() =>
@@ -243,17 +247,17 @@ export default function SessionResultScreen() {
   const fullViewProps = firstVisit ? { entering: FadeIn.duration(400) } : {};
 
   const ratingBand = band(data.rating);
-  const motivation = motivationalMessage(data.rating);
+  const motivation = motivationalMessage(data.rating, tr);
 
   return (
     <Screen scroll footer={footer}>
       <FullViewContainer {...fullViewProps}>
         <View style={styles.topBar}>
-          <Text style={styles.eyebrow}>Resultado</Text>
+          <Text style={styles.eyebrow}>{tr("result.eyebrow_result")}</Text>
           <Pressable
             onPress={() => router.replace("/")}
             hitSlop={16}
-            accessibilityLabel="Fechar"
+            accessibilityLabel={tr("result.close_a11y")}
           >
             <X size={24} color={palette.neutral[400]} weight="regular" />
           </Pressable>
@@ -272,42 +276,42 @@ export default function SessionResultScreen() {
         </View>
         <Hairline />
 
-        <Block title="Resumo">
+        <Block title={tr("result.section_summary")}>
           <Text style={styles.bodyText}>{feedback.summary}</Text>
         </Block>
         <Hairline />
 
         <View style={styles.metricsRow}>
           <MetricCol
-            eyebrow="Velocidade"
+            eyebrow={tr("result.metric_velocity")}
             value={Math.round(data.wpm).toString()}
-            bandLabel={wpmLabel(data.wpm)}
+            bandLabel={wpmLabel(data.wpm, tr)}
             good={wpmIsGood(data.wpm)}
           />
           <MetricCol
-            eyebrow="Filler words"
+            eyebrow={tr("result.metric_filler_words")}
             value={String(data.filler_count)}
-            bandLabel={fillerLabel(data.filler_count)}
+            bandLabel={fillerLabel(data.filler_count, tr)}
             good={fillerIsGood(data.filler_count)}
           />
           <MetricCol
-            eyebrow="Variação"
+            eyebrow={tr("result.metric_variation")}
             value={data.pacing_variation.toFixed(2)}
-            bandLabel={pacingLabel(data.pacing_variation)}
+            bandLabel={pacingLabel(data.pacing_variation, tr)}
             good={pacingIsGood(data.pacing_variation)}
           />
         </View>
         <Hairline />
 
-        <NumberedBlock title="Pontos fortes" items={feedback.strengths} />
-        <NumberedBlock title="A melhorar" items={feedback.weaknesses} />
-        <NumberedBlock title="Próximo treino" items={feedback.suggestions} />
+        <NumberedBlock title={tr("result.section_strengths")} items={feedback.strengths} />
+        <NumberedBlock title={tr("result.section_improve")} items={feedback.weaknesses} />
+        <NumberedBlock title={tr("result.section_next_training")} items={feedback.suggestions} />
 
-        <Block title="Avaliação">
+        <Block title={tr("result.section_judging")}>
           <View style={styles.judgeList}>
-            <JudgeRow label="Adequação à audiência" text={feedback.audience_fit} />
-            <JudgeRow label="Concisão" text={feedback.conciseness} />
-            <JudgeRow label="Foco" text={feedback.dispersion} />
+            <JudgeRow label={tr("result.judge_audience_fit")} text={feedback.audience_fit} />
+            <JudgeRow label={tr("result.judge_conciseness")} text={feedback.conciseness} />
+            <JudgeRow label={tr("result.judge_dispersion")} text={feedback.dispersion} />
           </View>
         </Block>
         <Hairline />
@@ -386,6 +390,7 @@ function MetricCol({
 }
 
 function ReplayBlock({ data }: { data: SessionResult }) {
+  const { t: tr } = useT();
   const [seek, setSeek] = useState<SeekRequest | null>(null);
   const handleFillerTap = (hit: FillerHit) => {
     setSeek((prev) => ({ time: hit.start, n: (prev?.n ?? 0) + 1 }));
@@ -394,7 +399,7 @@ function ReplayBlock({ data }: { data: SessionResult }) {
   return (
     <View style={styles.block}>
       <View style={styles.transcriptHead}>
-        <Text style={styles.eyebrow}>Transcrição</Text>
+        <Text style={styles.eyebrow}>{tr("result.transcript_eyebrow")}</Text>
         <Text style={styles.transcriptMeta}>
           {formatMmSs(data.audio_duration_s)} · {Math.round(data.wpm)} WPM
         </Text>
@@ -413,7 +418,7 @@ function ReplayBlock({ data }: { data: SessionResult }) {
       {data.filler_timestamps?.length ? (
         <View style={styles.fillerSection}>
           <Text style={styles.fillerHeading}>
-            Filler words ({data.filler_timestamps.length}) · toca para ouvir
+            {tr("result.filler_heading", { count: data.filler_timestamps.length })}
           </Text>
           <View style={styles.fillerWrap}>
             {data.filler_timestamps.map((hit, i) => (
@@ -448,16 +453,17 @@ function FirstVisitPager({
   onAdvance: () => void;
   onClose: () => void;
 }) {
+  const { t: tr } = useT();
   const { feedback } = data;
   const ratingBand = band(data.rating);
-  const motivation = motivationalMessage(data.rating);
+  const motivation = motivationalMessage(data.rating, tr);
   const isLast = pageIndex >= TOTAL_PAGES - 1;
 
   const counter = `${pageIndex + 1}/${TOTAL_PAGES}`;
 
   const footer = (
     <DuoButton
-      title={isLast ? "VER TUDO" : "CONTINUAR"}
+      title={isLast ? tr("result.cta_see_all_caps") : tr("common.continue_caps")}
       variant="primary"
       onPress={onAdvance}
     />
@@ -505,26 +511,30 @@ function FirstVisitPager({
           <View style={styles.pg3_root}>
             <View style={{ flex: 1 }} />
             <MetricRow
-              eyebrow="Velocidade"
+              eyebrow={tr("result.metric_velocity")}
               value={Math.round(data.wpm).toString()}
-              unit="palavras/min"
-              band={wpmLabel(data.wpm)}
+              unit={tr("result.metric_words_per_min")}
+              band={wpmLabel(data.wpm, tr)}
               good={wpmIsGood(data.wpm)}
             />
             <View style={styles.pg3_divider} />
             <MetricRow
-              eyebrow="Filler words"
+              eyebrow={tr("result.metric_filler_words")}
               value={String(data.filler_count)}
-              unit={data.top_filler ? `"${data.top_filler}"` : "filler words"}
-              band={fillerLabel(data.filler_count)}
+              unit={
+                data.top_filler
+                  ? `"${data.top_filler}"`
+                  : tr("result.metric_filler_word_unit")
+              }
+              band={fillerLabel(data.filler_count, tr)}
               good={fillerIsGood(data.filler_count)}
             />
             <View style={styles.pg3_divider} />
             <MetricRow
-              eyebrow="Variação"
+              eyebrow={tr("result.metric_variation")}
               value={data.pacing_variation.toFixed(2)}
-              unit="ritmo"
-              band={pacingLabel(data.pacing_variation)}
+              unit={tr("result.metric_pace_unit")}
+              band={pacingLabel(data.pacing_variation, tr)}
               good={pacingIsGood(data.pacing_variation)}
             />
             <View style={{ flex: 1 }} />
@@ -533,8 +543,8 @@ function FirstVisitPager({
 
         {pageIndex === 3 ? (
           <ListPage
-            title="Pontos fortes"
-            subtitle="O que correu mesmo bem hoje."
+            title={tr("result.section_strengths")}
+            subtitle={tr("result.page_subtitle_strengths")}
             items={feedback.strengths}
             icon={CheckCircle}
           />
@@ -542,8 +552,8 @@ function FirstVisitPager({
 
         {pageIndex === 4 ? (
           <ListPage
-            title="A melhorar"
-            subtitle="Onde focar na próxima tentativa."
+            title={tr("result.section_improve")}
+            subtitle={tr("result.page_subtitle_improve")}
             items={feedback.weaknesses}
             icon={Info}
           />
@@ -551,8 +561,8 @@ function FirstVisitPager({
 
         {pageIndex === 5 ? (
           <ListPage
-            title="Próximo treino"
-            subtitle="Leva isto para a próxima sessão."
+            title={tr("result.section_next_training")}
+            subtitle={tr("result.page_subtitle_next")}
             items={feedback.suggestions}
             icon={ArrowCircleRight}
           />
@@ -893,6 +903,7 @@ function AudioPlayer({
   duration: number;
   seekRequest: SeekRequest | null;
 }) {
+  const { t: tr } = useT();
   const player = useAudioPlayer({ uri });
   const status = useAudioPlayerStatus(player);
 
@@ -927,7 +938,7 @@ function AudioPlayer({
       <Pressable
         onPress={toggle}
         style={({ pressed }) => [styles.playBtn, pressed && { opacity: 0.6 }]}
-        accessibilityLabel={playing ? "Pausar" : "Reproduzir"}
+        accessibilityLabel={playing ? tr("result.pause_a11y") : tr("result.play_a11y")}
       >
         {playing ? (
           <Pause size={14} color={palette.neutral[700]} weight="bold" />

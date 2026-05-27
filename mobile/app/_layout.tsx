@@ -22,8 +22,14 @@ import { PlanCompletedOverlay } from "@/components/ui/PlanCompletedOverlay";
 import { RevealOverlay } from "@/components/ui/RevealOverlay";
 import { StreakUnlockedOverlay } from "@/components/ui/StreakUnlockedOverlay";
 import { getDeviceId } from "@/lib/deviceId";
+import { warmLanguage } from "@/lib/locale";
 import { startPushPolling } from "@/lib/push";
 import { colors, fonts, palette } from "@/lib/theme";
+
+// One-time warm of the language store from AsyncStorage so the first
+// rendered screen reads the user's saved language instead of the default.
+// Fire-and-forget; if it fails the in-memory default ('pt') sticks.
+void warmLanguage();
 
 SplashScreen.preventAutoHideAsync().catch(() => {});
 

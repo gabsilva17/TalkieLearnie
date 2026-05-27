@@ -43,7 +43,14 @@ import Animated, {
 import { DuoButton } from "@/components/ui/DuoButton";
 import { Screen } from "@/components/ui/Screen";
 import { FocusMode, api } from "@/lib/api";
+import {
+  formatLongMonthDay,
+  monthNamesFull,
+  weekdayInitials,
+} from "@/lib/dateFormat";
 import { getDeviceId } from "@/lib/deviceId";
+import { useT } from "@/lib/i18n";
+import { peekLanguage } from "@/lib/locale";
 import { startPendingPlan } from "@/lib/pendingPlan";
 import { colors, fonts, palette, radii, spacing, type as t } from "@/lib/theme";
 
@@ -59,21 +66,11 @@ function daysUntilLocalMidnight(d: Date): number {
 
 const AnimatedTextInput = Animated.createAnimatedComponent(TextInput);
 
-const MONTH_NAMES_FULL_PT = [
-  "janeiro", "fevereiro", "março", "abril", "maio", "junho",
-  "julho", "agosto", "setembro", "outubro", "novembro", "dezembro",
-];
-const WEEKDAY_NAMES_PT = ["S", "T", "Q", "Q", "S", "S", "D"];
-
 function tomorrow(): Date {
   const d = new Date();
   d.setDate(d.getDate() + 1);
   d.setHours(0, 0, 0, 0);
   return d;
-}
-
-function formatLongMonthDay(d: Date): string {
-  return d.toLocaleDateString("pt-PT", { day: "numeric", month: "long" });
 }
 
 function stripTime(d: Date): Date {
@@ -133,24 +130,23 @@ function meteringToAmp(db: number | undefined): number {
   return norm;
 }
 
-const PROMPTS: Record<Step, string> = {
-  0: "Olá! Para que te queres preparar?",
-  1: "Quando é o grande dia?",
-  2: "E quem te vai estar a ouvir?",
-  3: "Tens material para partilhar?",
-};
-
-const SUBTITLES: Record<Step, string | null> = {
-  0: "Pitch, entrevista, conversa difícil. Diz-nos em poucas palavras.",
-  1: null,
-  2: "Quanto mais souberes sobre eles, melhor preparamos o plano.",
-  3: "Adiciona um deck, briefing ou notas para um plano mais afinado. (opcional)",
-};
-
 type FieldKey = "prep" | "audience" | "extra";
 
 export default function Onboarding() {
   const router = useRouter();
+  const { lang, t: tr } = useT();
+  const PROMPTS: Record<Step, string> = {
+    0: tr("onboarding.prompt_step_0"),
+    1: tr("onboarding.prompt_step_1"),
+    2: tr("onboarding.prompt_step_2"),
+    3: tr("onboarding.prompt_step_3"),
+  };
+  const SUBTITLES: Record<Step, string | null> = {
+    0: tr("onboarding.subtitle_step_0"),
+    1: null,
+    2: tr("onboarding.subtitle_step_2"),
+    3: tr("onboarding.subtitle_step_3"),
+  };
   const [step, setStep] = useState<Step>(0);
   const [prepFor, setPrepFor] = useState("");
   const [audience, setAudience] = useState("");
@@ -233,6 +229,7 @@ export default function Onboarding() {
         pdf_uri: pdf ? pdf.uri : null,
         pdf_name: pdf ? pdf.name : null,
         focus_mode: hasExtraContext ? focusMode : null,
+        language: peekLanguage(),
       });
       router.replace("/plan/pending");
     } catch (e) {
@@ -287,7 +284,7 @@ export default function Onboarding() {
       const asset = result.assets[0];
       const size = asset.size ?? 0;
       if (size > MAX_PDF_BYTES) {
-        setError("O PDF é demasiado grande (máximo 32 MB).");
+        setError(tr("onboarding.error_pdf_too_big"));
         return;
       }
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
@@ -388,8 +385,8 @@ export default function Onboarding() {
     if (!granted) {
       recordingIntentRef.current = false;
       Alert.alert(
-        "Microfone",
-        "Precisamos de permissão de microfone para ditar a resposta.",
+        tr("onboarding.mic_permission_title"),
+        tr("onboarding.mic_permission_body"),
       );
       return;
     }
@@ -480,7 +477,7 @@ export default function Onboarding() {
       const res = await api.transcribeAsk({ device_id: deviceId, audio_uri: uri });
       const text = (res.text || "").trim();
       if (!text) {
-        setError("Não consegui ouvir nada. Tenta de novo num sítio mais calmo.");
+        setError(tr("onboarding.error_no_speech"));
       } else if (field === "prep") {
         setPrepFor((prev) =>
           prev.trim().length > 0 ? `${prev.trim()} ${text}` : text,
@@ -511,7 +508,9 @@ export default function Onboarding() {
 
       <View style={styles.centerBlock}>
         <View style={styles.stepHeader}>
-          <Text style={styles.eyebrow}>{`Passo ${step + 1} de ${TOTAL}`}</Text>
+          <Text style={styles.eyebrow}>
+            {tr("onboarding.step_indicator", { step: step + 1, total: TOTAL })}
+          </Text>
           <Text style={styles.question}>{PROMPTS[step]}</Text>
           {SUBTITLES[step] ? (
             <Text style={styles.subtitle}>{SUBTITLES[step]}</Text>
@@ -524,7 +523,7 @@ export default function Onboarding() {
               <VoiceField
                 value={prepFor}
                 onChangeText={setPrepFor}
-                placeholder="Ex.: pitch de hackathon, entrevista de emprego..."
+                placeholder={tr("onboarding.placeholder_prep")}
                 autoFocus
                 onFocus={() => setFocusedField("prep")}
                 onBlur={() => setFocusedField(null)}
@@ -559,7 +558,7 @@ export default function Onboarding() {
               <VoiceField
                 value={audience}
                 onChangeText={setAudience}
-                placeholder="Ex.: júri não técnico, investidor série A, manager directo..."
+                placeholder={tr("onboarding.placeholder_audience")}
                 autoFocus
                 onFocus={() => setFocusedField("audience")}
                 onBlur={() => setFocusedField(null)}
@@ -581,7 +580,7 @@ export default function Onboarding() {
               <VoiceField
                 value={extraText}
                 onChangeText={setExtraText}
-                placeholder="Ex.: notas do briefing, perguntas frequentes, números-chave..."
+                placeholder={tr("onboarding.placeholder_extra")}
                 onFocus={() => setFocusedField("extra")}
                 onBlur={() => setFocusedField(null)}
                 animatedBorder={animatedBorder}
@@ -628,7 +627,7 @@ export default function Onboarding() {
           pointerEvents={confirming ? "none" : "auto"}
         >
           <DuoButton
-            title={step < 3 ? "CONTINUAR" : "GERAR O MEU PLANO"}
+            title={step < 3 ? tr("onboarding.cta_continue_caps") : tr("onboarding.cta_generate_caps")}
             onPress={next}
             disabled={!canContinue || confirming}
             loading={submitting}
@@ -636,7 +635,7 @@ export default function Onboarding() {
         </Animated.View>
 
         {step === 3 ? (
-          <Text style={styles.hint}>A IA prepara as sessões em 10–20 segundos.</Text>
+          <Text style={styles.hint}>{tr("onboarding.hint_generation_time")}</Text>
         ) : null}
       </View>
     </Screen>
@@ -764,6 +763,9 @@ function CalendarPicker({
   onChange: (d: Date) => void;
   min: Date;
 }) {
+  const { lang, t: tr } = useT();
+  const monthNames = monthNamesFull(lang);
+  const weekdayNames = weekdayInitials(lang);
   const [view, setView] = useState({
     year: value.getFullYear(),
     month: value.getMonth(),
@@ -822,7 +824,7 @@ function CalendarPicker({
         </Pressable>
         <Text style={styles.calNavTitle}>
           <Text style={styles.calNavMonth}>
-            {MONTH_NAMES_FULL_PT[view.month]}
+            {monthNames[view.month]}
           </Text>
           <Text style={styles.calNavYear}> {view.year}</Text>
         </Text>
@@ -836,7 +838,7 @@ function CalendarPicker({
       </View>
 
       <View style={styles.calWeekHeader}>
-        {WEEKDAY_NAMES_PT.map((w, i) => (
+        {weekdayNames.map((w, i) => (
           <Text key={i} style={styles.calWeekHeaderText}>
             {w}
           </Text>
@@ -888,9 +890,11 @@ function CalendarPicker({
 
       <View style={styles.calSelectedRow}>
         <CalendarBlank size={16} color={palette.primary[600]} weight="bold" />
-        <Text style={styles.calSelectedLabel}>Seleccionado:</Text>
+        <Text style={styles.calSelectedLabel}>
+          {tr("onboarding.calendar_selected")}
+        </Text>
         <Text style={styles.calSelectedValue}>
-          {formatLongMonthDay(value)}
+          {formatLongMonthDay(value, lang)}
         </Text>
       </View>
     </View>
@@ -939,6 +943,7 @@ function VoiceField({
   idleStyle: AnimatedStyle;
   recordingStyle: AnimatedStyle;
 }) {
+  const { t: tr } = useT();
   return (
     <View>
       <View style={styles.voiceLayerStack}>
@@ -946,7 +951,7 @@ function VoiceField({
           <View style={styles.inputWrap}>
             <AnimatedTextInput
               style={[styles.input, styles.inputWithMic, animatedBorder]}
-              placeholder={transcribing ? "A transcrever…" : placeholder}
+              placeholder={transcribing ? tr("onboarding.placeholder_transcribing") : placeholder}
               placeholderTextColor={palette.neutral[400]}
               value={value}
               onChangeText={onChangeText}
@@ -966,7 +971,7 @@ function VoiceField({
                   onPressIn={onStartRecord}
                   onPressOut={onStopRecord}
                   hitSlop={8}
-                  accessibilityLabel="Manter premido para ditar a resposta"
+                  accessibilityLabel={tr("onboarding.voice_a11y_prep")}
                   style={({ pressed }) => [
                     styles.inlineMicBtn,
                     pressed ? styles.inlineMicBtnPressed : null,
@@ -993,7 +998,7 @@ function VoiceField({
 
       {recording ? (
         <Animated.View entering={FadeIn.duration(200).delay(120)}>
-          <Text style={styles.holdHint}>Solta para enviar</Text>
+          <Text style={styles.holdHint}>{tr("onboarding.voice_hold_hint")}</Text>
         </Animated.View>
       ) : null}
     </View>
@@ -1065,6 +1070,7 @@ function PdfAttachment({
   onPick: () => void;
   onRemove: () => void;
 }) {
+  const { t: tr } = useT();
   if (pdf) {
     return (
       <View style={styles.pdfAttached}>
@@ -1086,7 +1092,7 @@ function PdfAttachment({
             styles.pdfRemoveBtn,
             pressed && styles.pdfRemoveBtnPressed,
           ]}
-          accessibilityLabel="Remover PDF"
+          accessibilityLabel={tr("onboarding.pdf_remove_a11y")}
         >
           <X size={16} color={palette.neutral[500]} weight="bold" />
         </Pressable>
@@ -1102,7 +1108,7 @@ function PdfAttachment({
       ]}
     >
       <Paperclip size={18} color={palette.primary[600]} weight="bold" />
-      <Text style={styles.pdfPickerText}>Anexar PDF</Text>
+      <Text style={styles.pdfPickerText}>{tr("onboarding.pdf_attach")}</Text>
     </Pressable>
   );
 }
@@ -1112,12 +1118,6 @@ function PdfAttachment({
 // the existing app behaviour is preserved unless the user actively shifts.
 // ---------------------------------------------------------------------------
 
-const FOCUS_OPTIONS: { value: FocusMode; label: string }[] = [
-  { value: "communication", label: "Comunicação" },
-  { value: "technical", label: "Técnico" },
-  { value: "both", label: "Ambos" },
-];
-
 function FocusToggle({
   value,
   onChange,
@@ -1125,11 +1125,17 @@ function FocusToggle({
   value: FocusMode;
   onChange: (m: FocusMode) => void;
 }) {
+  const { t: tr } = useT();
+  const FOCUS_OPTIONS: { value: FocusMode; label: string }[] = [
+    { value: "communication", label: tr("onboarding.focus_communication") },
+    { value: "technical", label: tr("onboarding.focus_technical") },
+    { value: "both", label: tr("onboarding.focus_both") },
+  ];
   return (
     <View style={styles.focusWrap}>
-      <Text style={styles.focusTitle}>Onde queres treinar mais?</Text>
+      <Text style={styles.focusTitle}>{tr("onboarding.focus_title")}</Text>
       <Text style={styles.focusSubtitle}>
-        O plano vai dar mais peso a esta dimensão.
+        {tr("onboarding.focus_subtitle")}
       </Text>
       <View style={styles.focusSegment}>
         {FOCUS_OPTIONS.map((opt) => {

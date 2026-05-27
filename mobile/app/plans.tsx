@@ -36,6 +36,7 @@ import { Screen } from "@/components/ui/Screen";
 import { TopBar } from "@/components/ui/TopBar";
 import { Plan, api } from "@/lib/api";
 import { getDeviceId } from "@/lib/deviceId";
+import { useT } from "@/lib/i18n";
 import { clearLastPlanId, setLastPlanId } from "@/lib/lastPlan";
 import {
   colors,
@@ -54,14 +55,6 @@ function daysUntil(iso: string): number {
   return Math.round((target - today.getTime()) / 86_400_000);
 }
 
-function formatTargetLabel(iso: string): string {
-  const diff = daysUntil(iso);
-  if (diff < 0) return "concluído";
-  if (diff === 0) return "hoje";
-  if (diff === 1) return "amanhã";
-  return `em ${diff} dias`;
-}
-
 function ArchiveToggle({
   count,
   open,
@@ -71,6 +64,7 @@ function ArchiveToggle({
   open: boolean;
   onToggle: () => void;
 }) {
+  const { t: tr } = useT();
   const rot = useSharedValue(open ? 1 : 0);
   useEffect(() => {
     rot.value = withTiming(open ? 1 : 0, {
@@ -93,7 +87,7 @@ function ArchiveToggle({
         <CaretRight size={14} color={palette.neutral[500]} weight="bold" />
       </Animated.View>
       <Text style={styles.archiveToggleText}>
-        Concluídos ({count})
+        {tr("plans.archived_label", { count })}
       </Text>
     </Pressable>
   );
@@ -129,7 +123,16 @@ function PlanIndicator({
 
 export default function PlansHomeScreen() {
   const router = useRouter();
+  const { t: tr } = useT();
   const [deviceId, setDeviceId] = useState<string | null>(null);
+
+  function formatTargetLabel(iso: string): string {
+    const diff = daysUntil(iso);
+    if (diff < 0) return tr("plans.target_done");
+    if (diff === 0) return tr("plans.target_today");
+    if (diff === 1) return tr("plans.target_tomorrow");
+    return tr("plans.target_in_days", { count: diff });
+  }
 
   useEffect(() => {
     getDeviceId().then(setDeviceId).catch(() => {});
@@ -220,23 +223,23 @@ export default function PlansHomeScreen() {
       );
       cancelRename();
     } catch (e) {
-      Alert.alert("Erro", (e as Error).message);
+      Alert.alert(tr("common.error"), (e as Error).message);
     } finally {
       setRenaming(false);
     }
-  }, [renamePlan, renameValue, cancelRename]);
+  }, [renamePlan, renameValue, cancelRename, tr]);
 
   const startDelete = useCallback(() => {
     if (!actionPlan) return;
     const plan = actionPlan;
     setActionPlan(null);
     Alert.alert(
-      "Apagar plano?",
-      `Vais perder o histórico de "${plan.name ?? plan.prep_for}". Esta acção é definitiva.`,
+      tr("plans.delete_confirm_title"),
+      tr("plans.delete_confirm_body", { name: plan.name ?? plan.prep_for }),
       [
-        { text: "Cancelar", style: "cancel" },
+        { text: tr("common.cancel"), style: "cancel" },
         {
-          text: "Apagar",
+          text: tr("common.delete_caps"),
           style: "destructive",
           onPress: async () => {
             setBusyId(plan.id);
@@ -248,7 +251,7 @@ export default function PlansHomeScreen() {
               );
               await clearLastPlanId();
             } catch (e) {
-              Alert.alert("Erro", (e as Error).message);
+              Alert.alert(tr("common.error"), (e as Error).message);
             } finally {
               setBusyId(null);
             }
@@ -256,15 +259,15 @@ export default function PlansHomeScreen() {
         },
       ],
     );
-  }, [actionPlan]);
+  }, [actionPlan, tr]);
 
   if (error && !plans) {
     return (
       <SafeAreaView style={styles.safe} edges={["top", "left", "right"]}>
-        <TopBar title="Planos" />
+        <TopBar title={tr("plans.title")} />
         <View style={styles.center}>
           <Text style={styles.errorText}>{error}</Text>
-          <DuoButton title="TENTAR DE NOVO" onPress={load} fullWidth={false} />
+          <DuoButton title={tr("common.retry_caps")} onPress={load} fullWidth={false} />
         </View>
       </SafeAreaView>
     );
@@ -273,7 +276,7 @@ export default function PlansHomeScreen() {
   if (loading) {
     return (
       <SafeAreaView style={styles.safe} edges={["top", "left", "right"]}>
-        <TopBar title="Planos" />
+        <TopBar title={tr("plans.title")} />
         <Animated.View entering={FadeIn.duration(220)} style={styles.center}>
           <LogoMark size="lg" />
         </Animated.View>
@@ -333,7 +336,9 @@ export default function PlansHomeScreen() {
                 archived ? styles.cardEyebrowArchived : null,
               ]}
             >
-              {archived ? "Concluído" : formatTargetLabel(p.target_date)}
+              {archived
+                ? tr("plans.eyebrow_archived")
+                : formatTargetLabel(p.target_date)}
             </Text>
             <Text
               style={[
@@ -367,17 +372,19 @@ export default function PlansHomeScreen() {
 
   const subtitle =
     activePlans.length > 0
-      ? `${activePlans.length} ${activePlans.length === 1 ? "plano" : "planos"} a treinar`
+      ? activePlans.length === 1
+        ? tr("plans.subtitle_one")
+        : tr("plans.subtitle_many", { count: activePlans.length })
       : list.length > 0
-        ? "Concluíste tudo. Cria um novo plano."
-        : "Cria o teu primeiro plano de treino.";
+        ? tr("plans.subtitle_all_done")
+        : tr("plans.subtitle_first_time");
 
   return (
     <>
       <Screen
         scroll
         onRefresh={load}
-        header={<TopBar title="Planos" subtitle={subtitle} />}
+        header={<TopBar title={tr("plans.title")} subtitle={subtitle} />}
         reserveBottomNav
         contentStyle={{
           paddingTop: spacing.md,
@@ -388,40 +395,38 @@ export default function PlansHomeScreen() {
             <View style={styles.empty}>
               {list.length === 0 ? (
                 <Text style={styles.emptyTitle}>
-                  Pronto para{" "}
-                  <Text style={styles.emptyTitleAccent}>falar?</Text>
+                  {tr("plans.empty_title_first")}{" "}
+                  <Text style={styles.emptyTitleAccent}>
+                    {tr("plans.empty_title_first_accent")}
+                  </Text>
                 </Text>
               ) : (
-                <Text style={styles.emptyTitle}>Tudo concluído</Text>
+                <Text style={styles.emptyTitle}>{tr("plans.empty_title_after")}</Text>
               )}
               <Text style={styles.emptyBody}>
                 {list.length === 0
-                  ? "A IA monta-te um plano diário para te preparares para aquele momento em que as tuas skills de comunicação precisam de estar afiadas."
-                  : "Cria um novo plano para continuar a treinar."}
+                  ? tr("plans.empty_body_first")
+                  : tr("plans.empty_body_after")}
               </Text>
               {list.length === 0 ? (
                 <View style={styles.featureList}>
                   <View style={styles.featureItem}>
                     <Text style={styles.featureNum}>01</Text>
-                    <Text style={styles.featureLabel}>
-                      Plano personalizado
-                    </Text>
+                    <Text style={styles.featureLabel}>{tr("plans.feature_1")}</Text>
                   </View>
                   <View style={styles.featureItem}>
                     <Text style={styles.featureNum}>02</Text>
-                    <Text style={styles.featureLabel}>Treino por voz</Text>
+                    <Text style={styles.featureLabel}>{tr("plans.feature_2")}</Text>
                   </View>
                   <View style={styles.featureItem}>
                     <Text style={styles.featureNum}>03</Text>
-                    <Text style={styles.featureLabel}>
-                      Feedback instantâneo
-                    </Text>
+                    <Text style={styles.featureLabel}>{tr("plans.feature_3")}</Text>
                   </View>
                 </View>
               ) : null}
               <View style={styles.emptyCta}>
                 <DuoButton
-                  title="NOVO PLANO"
+                  title={tr("plans.new_plan_caps")}
                   onPress={() => router.push("/onboarding")}
                 />
               </View>
@@ -456,7 +461,7 @@ export default function PlansHomeScreen() {
             </View>
             <View style={styles.ctaWrap}>
               <DuoButton
-                title="NOVO PLANO"
+                title={tr("plans.new_plan_caps")}
                 onPress={() => router.push("/onboarding")}
               />
             </View>
@@ -497,7 +502,7 @@ export default function PlansHomeScreen() {
             style={styles.sheet}
             onPress={(e) => e.stopPropagation()}
           >
-            <Text style={styles.sheetEyebrow}>Plano</Text>
+            <Text style={styles.sheetEyebrow}>{tr("plans.sheet_eyebrow_plan")}</Text>
             <Text style={styles.sheetTitle} numberOfLines={2}>
               {actionPlan ? (actionPlan.name ?? actionPlan.prep_for) : ""}
             </Text>
@@ -514,7 +519,7 @@ export default function PlansHomeScreen() {
                 color={palette.primary[600]}
                 weight="bold"
               />
-              <Text style={styles.sheetActionText}>Mudar o nome</Text>
+              <Text style={styles.sheetActionText}>{tr("plans.sheet_action_rename")}</Text>
             </Pressable>
 
             <Pressable
@@ -530,7 +535,7 @@ export default function PlansHomeScreen() {
                 weight="bold"
               />
               <Text style={[styles.sheetActionText, styles.sheetActionDanger]}>
-                Apagar plano
+                {tr("plans.sheet_action_delete")}
               </Text>
             </Pressable>
 
@@ -541,7 +546,7 @@ export default function PlansHomeScreen() {
                 pressed ? { opacity: 0.6 } : null,
               ]}
             >
-              <Text style={styles.sheetCancelText}>CANCELAR</Text>
+              <Text style={styles.sheetCancelText}>{tr("common.cancel_caps")}</Text>
             </Pressable>
           </Pressable>
         </Pressable>
@@ -559,8 +564,8 @@ export default function PlansHomeScreen() {
         >
           <Pressable style={styles.backdropFill} onPress={cancelRename} />
           <View style={styles.sheet}>
-            <Text style={styles.sheetEyebrow}>Mudar nome</Text>
-            <Text style={styles.sheetTitle}>Como queres chamar a este plano?</Text>
+            <Text style={styles.sheetEyebrow}>{tr("plans.rename_eyebrow")}</Text>
+            <Text style={styles.sheetTitle}>{tr("plans.rename_title")}</Text>
 
             <TextInput
               value={renameValue}
@@ -568,7 +573,7 @@ export default function PlansHomeScreen() {
               autoFocus
               multiline
               maxLength={200}
-              placeholder="Ex.: entrevista na Acme"
+              placeholder={tr("plans.rename_placeholder")}
               placeholderTextColor={palette.neutral[400]}
               style={styles.renameInput}
               editable={!renaming}
@@ -584,10 +589,10 @@ export default function PlansHomeScreen() {
                   pressed ? { opacity: 0.6 } : null,
                 ]}
               >
-                <Text style={styles.sheetCancelText}>CANCELAR</Text>
+                <Text style={styles.sheetCancelText}>{tr("common.cancel_caps")}</Text>
               </Pressable>
               <DuoButton
-                title={renaming ? "A GUARDAR…" : "GUARDAR"}
+                title={renaming ? tr("common.saving_caps") : tr("common.save_caps")}
                 onPress={submitRename}
                 disabled={renaming || !renameValue.trim()}
                 fullWidth={false}

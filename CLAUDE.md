@@ -559,6 +559,9 @@ AsyncStorage keys (`mobile/lib/`):
 - `user_name` (`lib/userName.ts`) — display name shown on the profile
   greeting. Defaults to "Gabriel". Editable from the profile screen via the
   pencil affordance next to the name.
+- `app_language` (`lib/locale.ts`) — `"pt"` or `"en"`. Default `"pt"`.
+  Set by the segmented toggle in the profile overlay. Boot-warmed by
+  `_layout.tsx` so the first screen renders in the correct language.
 
 **That's it.** AsyncStorage stores only things that don't live in the
 database. Earlier builds also persisted (a) a stale-while-revalidate cache
@@ -666,10 +669,38 @@ on the polling fallback automatically — same device, two different
   `backend/app/services/`, Pydantic models in `backend/app/schemas.py`.
 - Mobile: screens/layouts in `mobile/app/` (expo-router file-based).
   Shared utilities in `mobile/lib/`. Path alias `@/*` → repo root.
-- All LLM prompts AND user-facing copy are **European Portuguese (pt-PT)**,
-  never pt-BR. Anthropic system prompts explicitly forbid gerundios brasileiros
+- The default language is **European Portuguese (pt-PT)**, never pt-BR.
+  Anthropic pt-PT system prompts explicitly forbid gerundios brasileiros
   ("estou falando" → "estou a falar"; "você" → "tu"). The pt-PT filler list
   lives in `backend/app/services/fillers_pt.py`.
+- **English is an opt-in user toggle**, set on the profile screen. Persisted
+  in mobile AsyncStorage under `app_language` (see `mobile/lib/locale.ts`);
+  default `pt`. The whole UI re-renders when the toggle flips via the i18n
+  hook (`useT` in `mobile/lib/i18n.ts`). Flat PT / EN dictionaries live at
+  `mobile/lib/locales/{pt,en}.ts`; PT is the canonical key set, EN must
+  mirror every key (TS enforces this). **Don't add raw user-facing literals
+  to screens — use `t("...")`.** Date / month / weekday names go through
+  `mobile/lib/dateFormat.ts` (lang-aware `Intl.DateTimeFormat`).
+- Each plan persists its own `language` column (added to `plans`). Every
+  downstream LLM call (plan_gen, analyze, motivation, ask-with-plan-context,
+  Whisper) uses **the plan's** language, NOT the device's current toggle.
+  This way a pt-PT plan keeps producing pt-PT feedback even after the user
+  flips to EN. Mixed reality only exists at the boundary (an old pt-PT plan
+  with EN chrome). Legacy rows default to `'pt'`.
+- Backend services accept a `lang: Literal["pt","en"]` argument:
+  `plan_gen.generate_plan_days(..., lang)`, `analyze(..., lang)`,
+  `motivate(prep_for, lang)`, `answer(messages, plan_ctx, lang)`,
+  `transcribe(audio, lang)`, `metrics.compute_metrics(..., lang)`,
+  `profile.build_profile(..., lang)`. The filler dispatcher
+  `backend/app/services/fillers.py` routes to `fillers_pt.py` /
+  `fillers_en.py` per language.
+- Backend routes accept `lang`: `POST /plans` form `language`; `GET /profile`
+  query `lang`; `POST /motivation` body `lang` (falls back to the plan's
+  stored language); `POST /ask` body `lang` (overridden by the plan's
+  language when `plan_id` is provided); `POST /ask/transcribe` form `lang`.
+  Localized HTTPException strings (the two 422 messages, the PDF errors)
+  use tiny inline `{"pt": ..., "en": ...}` dicts in each route module —
+  don't reach into the mobile i18n table from the backend.
 - **No em dashes (`—`) anywhere the user sees them.** This applies to LLM
   output (every system prompt forbids `—`; use periods, commas, colons, or
   parentheses instead) AND to hardcoded UI strings / placeholders (use a

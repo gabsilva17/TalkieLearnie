@@ -26,22 +26,14 @@ import {
   peekAchievement,
   subscribeAchievements,
 } from "@/lib/achievementsQueue";
+import { useT } from "@/lib/i18n";
 import { colors, fonts, palette, radii, spacing } from "@/lib/theme";
 
-const PT_MOTIVATIONS = [
-  "Mais um passo. Continua a treinar.",
-  "Isso é trabalho consistente. Não pares.",
-  "A prática diária está a dar frutos.",
-  "Estás a construir um hábito. Mantém o ritmo.",
-  "Vai com tudo para a próxima sessão.",
-  "Pequenas vitórias, grande caminho.",
-  "Estás cada vez mais à vontade. Continua.",
-];
-
-function pickMotivation(id: string): string {
+function pickFromList(list: readonly string[], id: string): string {
+  if (list.length === 0) return "";
   let hash = 0;
   for (let i = 0; i < id.length; i++) hash = (hash * 31 + id.charCodeAt(i)) >>> 0;
-  return PT_MOTIVATIONS[hash % PT_MOTIVATIONS.length];
+  return list[hash % list.length];
 }
 
 export function AchievementUnlockedOverlay() {
@@ -56,6 +48,7 @@ export function AchievementUnlockedOverlay() {
 }
 
 function CelebrationCard({ achievement }: { achievement: ProfileAchievement }) {
+  const { t: tr, list } = useT();
   const scrim = useSharedValue(0);
   const cardScale = useSharedValue(0.7);
   const cardOpacity = useSharedValue(0);
@@ -128,9 +121,10 @@ function CelebrationCard({ achievement }: { achievement: ProfileAchievement }) {
     transform: [{ scale: 0.9 + glow.value * 0.18 }],
   }));
 
+  const motivations = list("motivations.achievement");
   const motivation = useMemo(
-    () => pickMotivation(achievement.id),
-    [achievement.id],
+    () => pickFromList(motivations, achievement.id),
+    [motivations, achievement.id],
   );
 
   return (
@@ -141,7 +135,7 @@ function CelebrationCard({ achievement }: { achievement: ProfileAchievement }) {
 
       <View style={styles.center} pointerEvents="box-none">
         <Animated.View style={[styles.card, cardStyle]}>
-          <Text style={styles.eyebrow}>Conquista desbloqueada</Text>
+          <Text style={styles.eyebrow}>{tr("achievement_overlay.eyebrow")}</Text>
 
           <View style={styles.trophyWrap}>
             <Animated.View style={[styles.trophyGlow, glowStyle]} />
@@ -163,7 +157,7 @@ function CelebrationCard({ achievement }: { achievement: ProfileAchievement }) {
 
           <View style={styles.buttonWrap}>
             <DuoButton
-              title="CONTINUAR"
+              title={tr("common.continue_caps")}
               variant="primary"
               onPress={() => {
                 if (!enteringDone) return;

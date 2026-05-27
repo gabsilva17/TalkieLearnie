@@ -2,6 +2,7 @@ import mimetypes
 import re
 from datetime import date
 from pathlib import Path
+from typing import Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
@@ -12,9 +13,11 @@ from ..schemas import ReanalyzeSessionReq, SessionCelebrations, SessionOut
 from ..services.analyze import analyze
 from ..services.metrics import compute_metrics
 from ..services.profile import build_profile
-from ..services.transcribe import transcribe_pt
+from ..services.transcribe import transcribe
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
+
+Language = Literal["pt", "en"]
 
 AUDIO_DIR = Path(__file__).resolve().parents[2] / "data" / "audio"
 _AUDIO_NAME_RE = re.compile(r"^[A-Za-z0-9_\-]+\.[A-Za-z0-9]+$")
@@ -23,6 +26,35 @@ _AUDIO_NAME_RE = re.compile(r"^[A-Za-z0-9_\-]+\.[A-Za-z0-9]+$")
 # for the pacing / filler / WPM metrics to mean anything, and Sonnet ends up
 # inventing feedback. Bounce the user back to re-record instead.
 MIN_SESSION_DURATION_S = 5.0
+
+# Localised user-visible error messages emitted by POST /sessions. Same
+# pattern as plans: inline tiny dicts per language instead of pulling in the
+# mobile i18n layer.
+_ERR_DAY_NOT_TODAY = {
+    "pt": "só podes gravar a sessão do dia de hoje",
+    "en": "you can only record today's session",
+}
+_ERR_NO_SPEECH = {
+    "pt": (
+        "Não percebi nada do que disseste. Confirma que o microfone "
+        "está activo, fala para o microfone e tenta de novo."
+    ),
+    "en": (
+        "I couldn't make out anything. Check that the microphone is on, "
+        "speak into it, and try again."
+    ),
+}
+_ERR_TOO_SHORT = {
+    "pt": (
+        "A tua gravação foi demasiado curta. Precisamos de pelo menos "
+        "5 segundos para te darmos um feedback útil. Responde com um "
+        "pouco mais de detalhe e tenta de novo."
+    ),
+    "en": (
+        "Your recording was too short. We need at least 5 seconds to give "
+        "you useful feedback. Add a bit more detail and try again."
+    ),
+}
 
 
 def _audio_url(request: Request | None, filename: str | None) -> str | None:
@@ -73,8 +105,13 @@ def create_session(
     if plan["device_id"] != device_id:
         raise HTTPException(status_code=403, detail="plan_day does not belong to device_id")
 
+    # Plan-scoped language: every downstream LLM call uses the language the
+    # plan was created in, regardless of the device's current UI toggle.
+    raw_lang = plan.get("language") or "pt"
+    lang: Language = "en" if raw_lang == "en" else "pt"
+
     if str(day["day_date"]) != date.today().isoformat():
-        raise HTTPException(status_code=403, detail="só podes gravar a sessão do dia de hoje")
+        raise HTTPException(status_code=403, detail=_ERR_DAY_NOT_TODAY[lang])
 
     existing = (
         sb.table("sessions")
@@ -119,7 +156,7 @@ def create_session(
             )
             before_sessions = sess_q.data or []
         before_profile = build_profile(
-            before_sessions, before_plans_count, tz_offset_minutes
+            before_sessions, before_plans_count, tz_offset_minutes, lang=lang
         )
 
     try:
@@ -128,10 +165,11 @@ def create_session(
         audio.file.close()
 
     try:
-        whisper = transcribe_pt(
+        whisper = transcribe(
             audio_bytes,
             filename=audio.filename or "answer.m4a",
             content_type=audio.content_type or "audio/m4a",
+            lang=lang,
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"transcribe failed: {e}")
@@ -144,24 +182,11 @@ def create_session(
     # we spend Sonnet tokens and write to the DB. Two distinct messages so the
     # user knows what to fix on the retry.
     if not transcript:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "Não percebi nada do que disseste. Confirma que o microfone "
-                "está activo, fala para o microfone e tenta de novo."
-            ),
-        )
+        raise HTTPException(status_code=422, detail=_ERR_NO_SPEECH[lang])
     if duration_s < MIN_SESSION_DURATION_S:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "A tua gravação foi demasiado curta. Precisamos de pelo menos "
-                "5 segundos para te darmos um feedback útil. Responde com um "
-                "pouco mais de detalhe e tenta de novo."
-            ),
-        )
+        raise HTTPException(status_code=422, detail=_ERR_TOO_SHORT[lang])
 
-    metrics = compute_metrics(transcript, words, duration_s)
+    metrics = compute_metrics(transcript, words, duration_s, lang=lang)
 
     try:
         feedback = analyze(
@@ -172,6 +197,7 @@ def create_session(
             audience_info=plan["audience_info"],
             theme=day["theme"],
             question=day["question"],
+            lang=lang,
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"analyze failed: {e}")
@@ -245,7 +271,7 @@ def create_session(
         }
     ]
     after_profile = build_profile(
-        after_sessions, before_plans_count, tz_offset_minutes
+        after_sessions, before_plans_count, tz_offset_minutes, lang=lang
     )
 
     before_earned = {
@@ -327,11 +353,14 @@ def reanalyze_session(
 
     duration_s = float(row["audio_duration_s"])
 
+    raw_lang = plan.get("language") or "pt"
+    lang: Language = "en" if raw_lang == "en" else "pt"
+
     # Recompute the text-derived metrics from the edited transcript. We have
     # no word-level timestamps for the new text, so pacing_variation and the
     # filler_timestamps array carry over from the original (audio-derived)
     # values.
-    text_metrics = compute_metrics(new_transcript, [], duration_s)
+    text_metrics = compute_metrics(new_transcript, [], duration_s, lang=lang)
     metrics_for_judge = {
         **text_metrics,
         "pacing_variation": float(row["pacing_variation"]),
@@ -346,6 +375,7 @@ def reanalyze_session(
             audience_info=plan["audience_info"],
             theme=plan_day["theme"],
             question=plan_day["question"],
+            lang=lang,
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"analyze failed: {e}")

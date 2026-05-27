@@ -8,6 +8,7 @@ import { DayCardSkeleton } from "@/components/ui/DayCardSkeleton";
 import { DuoButton } from "@/components/ui/DuoButton";
 import { Screen } from "@/components/ui/Screen";
 import { TopBar } from "@/components/ui/TopBar";
+import { useT } from "@/lib/i18n";
 import {
   getPendingPlan,
   subscribePendingPlan,
@@ -29,6 +30,7 @@ const HANDOFF_DELAY_MS = 320;
 
 export default function PendingPlanScreen() {
   const router = useRouter();
+  const { t: tr } = useT();
   const state = useSyncExternalStore(
     subscribePendingPlan,
     getPendingPlan,
@@ -96,18 +98,18 @@ export default function PendingPlanScreen() {
       <Screen
         header={
           <TopBar
-            title="Plano"
-            subtitle="Algo correu mal"
+            title={tr("plan_pending.title")}
+            subtitle={tr("plan_pending.subtitle_error")}
             onBack={() => router.replace("/plans")}
           />
         }
       >
         <View style={styles.errorWrap}>
-          <Text style={styles.errorTitle}>Não conseguimos preparar o plano</Text>
+          <Text style={styles.errorTitle}>{tr("plan_pending.error_title")}</Text>
           <Text style={styles.errorBody}>{state.error}</Text>
           <View style={styles.errorActions}>
             <DuoButton
-              title="TENTAR DE NOVO"
+              title={tr("common.retry_caps")}
               onPress={() => router.replace("/onboarding")}
             />
           </View>
@@ -124,8 +126,8 @@ export default function PendingPlanScreen() {
     <Screen
       header={
         <TopBar
-          title="Plano"
-          subtitle="A preparar o teu plano"
+          title={tr("plan_pending.title")}
+          subtitle={tr("plan_pending.subtitle_preparing")}
           onBack={() => router.replace("/plans")}
         />
       }
@@ -133,7 +135,7 @@ export default function PendingPlanScreen() {
       contentStyle={{ paddingTop: spacing.md }}
     >
       <Animated.View entering={FadeIn.duration(240)} style={styles.prep}>
-        <Text style={styles.prepEyebrow}>A preparar</Text>
+        <Text style={styles.prepEyebrow}>{tr("plan_pending.prep_eyebrow")}</Text>
         <Text style={styles.prepText} numberOfLines={4}>
           {state.input.prep_for}
         </Text>

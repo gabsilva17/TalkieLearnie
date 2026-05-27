@@ -28,6 +28,7 @@ import Animated, {
 } from "react-native-reanimated";
 
 import { DuoButton } from "@/components/ui/DuoButton";
+import { useT } from "@/lib/i18n";
 import {
   dismissPlanCompleted,
   peekPlanCompleted,
@@ -36,20 +37,11 @@ import {
 } from "@/lib/planCompletionQueue";
 import { fonts, palette, radii, spacing } from "@/lib/theme";
 
-const PT_MOTIVATIONS = [
-  "Terminaste o plano. Agora és outro orador.",
-  "Cada dia treinado conta. E tu treinaste todos.",
-  "Plano fechado. Tens isto na ponta da língua.",
-  "Acabaste o que começaste. Isso é raro.",
-  "A consistência venceu. Bom trabalho.",
-  "Estás pronto. Foi isto que vieste treinar.",
-  "Um plano inteiro, do início ao fim. Respeita esse esforço.",
-];
-
-function pickMotivation(id: string): string {
+function pickFromList(list: readonly string[], id: string): string {
+  if (list.length === 0) return "";
   let hash = 0;
   for (let i = 0; i < id.length; i++) hash = (hash * 31 + id.charCodeAt(i)) >>> 0;
-  return PT_MOTIVATIONS[hash % PT_MOTIVATIONS.length];
+  return list[hash % list.length];
 }
 
 export function PlanCompletedOverlay() {
@@ -64,6 +56,7 @@ export function PlanCompletedOverlay() {
 }
 
 function CelebrationScreen({ event }: { event: PlanCompletedEvent }) {
+  const { t: tr, list } = useT();
   const bg = useSharedValue(0);
   const contentOpacity = useSharedValue(0);
   const contentY = useSharedValue(24);
@@ -139,7 +132,11 @@ function CelebrationScreen({ event }: { event: PlanCompletedEvent }) {
     transform: [{ scale: 0.85 + ringPulse.value * 0.35 }],
   }));
 
-  const motivation = useMemo(() => pickMotivation(event.plan_id), [event.plan_id]);
+  const motivations = list("motivations.plan_completed");
+  const motivation = useMemo(
+    () => pickFromList(motivations, event.plan_id),
+    [motivations, event.plan_id],
+  );
 
   return (
     <View pointerEvents="auto" style={StyleSheet.absoluteFill}>
@@ -148,7 +145,7 @@ function CelebrationScreen({ event }: { event: PlanCompletedEvent }) {
       <ConfettiBurst />
 
       <Animated.View style={[styles.content, contentStyle]} pointerEvents="box-none">
-        <Text style={styles.eyebrow}>Conquistaste</Text>
+        <Text style={styles.eyebrow}>{tr("plan_completed_overlay.eyebrow")}</Text>
 
         <View style={styles.medalWrap}>
           <Animated.View style={[styles.medalRing, ringStyle]} />
@@ -157,14 +154,15 @@ function CelebrationScreen({ event }: { event: PlanCompletedEvent }) {
           </Animated.View>
         </View>
 
-        <Text style={styles.headline}>Plano completo!</Text>
+        <Text style={styles.headline}>{tr("plan_completed_overlay.headline")}</Text>
         <Text style={styles.planName} numberOfLines={3}>
           {event.prep_for}
         </Text>
 
         <Text style={styles.daysLine}>
-          {event.total_days}{" "}
-          {event.total_days === 1 ? "dia treinado" : "dias treinados"}
+          {event.total_days === 1
+            ? tr("plan_completed_overlay.days_one")
+            : tr("plan_completed_overlay.days_many", { count: event.total_days })}
         </Text>
 
         <View style={styles.divider} />
@@ -173,7 +171,7 @@ function CelebrationScreen({ event }: { event: PlanCompletedEvent }) {
 
         <View style={styles.buttonWrap}>
           <DuoButton
-            title="FECHAR"
+            title={tr("plan_completed_overlay.cta_close_caps")}
             variant="secondary"
             onPress={() => {
               if (!enteringDone) return;

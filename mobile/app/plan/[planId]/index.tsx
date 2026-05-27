@@ -12,6 +12,7 @@ import { TopBar } from "@/components/ui/TopBar";
 import { Plan, api } from "@/lib/api";
 import { localTodayISO } from "@/lib/dayDate";
 import { getDeviceId } from "@/lib/deviceId";
+import { useT } from "@/lib/i18n";
 import { clearLastPlanId, setLastPlanId } from "@/lib/lastPlan";
 import { consumePendingPlan } from "@/lib/pendingPlan";
 import {
@@ -31,6 +32,7 @@ function daysUntil(iso: string): number {
 
 export default function PlanDetailScreen() {
   const router = useRouter();
+  const { t: tr } = useT();
   const { planId } = useLocalSearchParams<{ planId: string }>();
   // Warm hand-off from the /plan/pending optimistic screen: if the pending
   // store still holds a plan with this id, drain it into our initial state
@@ -83,10 +85,10 @@ export default function PlanDetailScreen() {
   if (error && !plan) {
     return (
       <SafeAreaView style={styles.safe} edges={["top", "left", "right"]}>
-        <TopBar title="Plano" onBack={() => router.push("/plans")} />
+        <TopBar title={tr("plan_detail.title")} onBack={() => router.push("/plans")} />
         <View style={styles.center}>
           <Text style={styles.errorText}>{error}</Text>
-          <DuoButton title="TENTAR DE NOVO" onPress={load} fullWidth={false} />
+          <DuoButton title={tr("common.retry_caps")} onPress={load} fullWidth={false} />
         </View>
       </SafeAreaView>
     );
@@ -95,7 +97,7 @@ export default function PlanDetailScreen() {
   if (loading) {
     return (
       <SafeAreaView style={styles.safe} edges={["top", "left", "right"]}>
-        <TopBar title="Plano" onBack={() => router.push("/plans")} />
+        <TopBar title={tr("plan_detail.title")} onBack={() => router.push("/plans")} />
         <Animated.View entering={FadeIn.duration(220)} style={styles.center}>
           <LogoMark size="lg" />
         </Animated.View>
@@ -108,8 +110,10 @@ export default function PlanDetailScreen() {
   const today = localTodayISO();
   const subtitle =
     stats.remaining > 0
-      ? `${stats.remaining} ${stats.remaining === 1 ? "dia" : "dias"} para te preparares`
-      : "O teu plano diário";
+      ? stats.remaining === 1
+        ? tr("plan_detail.subtitle_remaining_one")
+        : tr("plan_detail.subtitle_remaining_many", { count: stats.remaining })
+      : tr("plan_detail.subtitle_done");
 
   return (
     <Screen
@@ -117,7 +121,7 @@ export default function PlanDetailScreen() {
       onRefresh={load}
       header={
         <TopBar
-          title="Plano"
+          title={tr("plan_detail.title")}
           subtitle={subtitle}
           onBack={() => router.push("/plans")}
         />
@@ -128,7 +132,7 @@ export default function PlanDetailScreen() {
       }}
     >
       <Animated.View entering={FadeIn.duration(240)} style={styles.prep}>
-        <Text style={styles.prepEyebrow}>A preparar</Text>
+        <Text style={styles.prepEyebrow}>{tr("plan_detail.prep_eyebrow")}</Text>
         <Text style={styles.prepText} numberOfLines={4}>
           {plan.name ?? plan.prep_for}
         </Text>

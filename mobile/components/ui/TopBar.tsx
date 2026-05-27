@@ -12,6 +12,7 @@ import { CaretLeftIcon as CaretLeft } from "phosphor-react-native";
 import { StyleSheet, Text, View } from "react-native";
 
 import { PressableScale } from "@/components/ui/PressableScale";
+import { useT } from "@/lib/i18n";
 import { colors, fonts, palette, spacing } from "@/lib/theme";
 
 export type TopBarProps = {
@@ -21,6 +22,7 @@ export type TopBarProps = {
 };
 
 export function TopBar({ title, subtitle, onBack }: TopBarProps) {
+  const { t } = useT();
   return (
     <View style={styles.row}>
       {onBack ? (
@@ -31,7 +33,7 @@ export function TopBar({ title, subtitle, onBack }: TopBarProps) {
             onBack();
           }}
           accessibilityRole="button"
-          accessibilityLabel="Voltar"
+          accessibilityLabel={t("a11y.back")}
         >
           <View style={styles.iconButton}>
             <CaretLeft

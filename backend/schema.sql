@@ -19,6 +19,11 @@ create table plans (
   extra_text text,
   extra_pdf_filename text,
   focus_mode text,
+  -- Language the plan was created in ('pt' or 'en'). Every downstream LLM
+  -- call (analyze, motivation, Whisper) reads this column so a pt-PT plan
+  -- keeps producing pt-PT output even after the user flips the UI toggle.
+  -- Legacy rows default to 'pt'.
+  language text not null default 'pt',
   created_at timestamptz not null default now()
 );
 create index plans_device_idx on plans(device_id, created_at desc);
@@ -87,6 +92,7 @@ create table expo_push_tokens (
 -- alter table plans add column if not exists extra_pdf_filename text;
 -- alter table plans add column if not exists focus_mode text;
 -- alter table plans add column if not exists name text;
+-- alter table plans add column if not exists language text not null default 'pt';
 -- drop table if exists push_tokens;
 -- create table if not exists pending_pushes (
 --   id uuid primary key default gen_random_uuid(),

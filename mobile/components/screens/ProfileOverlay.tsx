@@ -57,7 +57,15 @@ import {
   ProfileActivityPoint,
   api,
 } from "@/lib/api";
+import {
+  formatShortDate as fmtShortDate,
+  monthNamesFull,
+  shortWeekdays,
+  weekdayInitials,
+} from "@/lib/dateFormat";
 import { getDeviceId } from "@/lib/deviceId";
+import { useT } from "@/lib/i18n";
+import { setLanguage, type Language } from "@/lib/locale";
 import {
   colors,
   fonts,
@@ -68,12 +76,6 @@ import {
 } from "@/lib/theme";
 import { getUserName, setUserName } from "@/lib/userName";
 
-const MONTH_NAMES_FULL_PT = [
-  "janeiro", "fevereiro", "março", "abril", "maio", "junho",
-  "julho", "agosto", "setembro", "outubro", "novembro", "dezembro",
-];
-const WEEKDAY_NAMES_PT = ["S", "T", "Q", "Q", "S", "S", "D"]; // seg..dom
-
 function heatmapColor(sessions: number): string {
   if (sessions <= 0) return palette.neutral[100];
   if (sessions === 1) return palette.primary[200];
@@ -81,22 +83,8 @@ function heatmapColor(sessions: number): string {
   return palette.primary[600];
 }
 
-function shortWeekday(iso: string): string {
-  const d = new Date(iso + "T00:00:00");
-  const names = ["dom", "seg", "ter", "qua", "qui", "sex", "sáb"];
-  return names[d.getDay()];
-}
-
-function dayOfMonth(iso: string): string {
-  return String(parseInt(iso.slice(8, 10), 10));
-}
-
-function formatShortDate(iso: string): string {
-  const d = new Date(iso + "T00:00:00");
-  return d.toLocaleDateString("pt-PT", { day: "2-digit", month: "short" });
-}
-
 export function ProfileOverlay({ onClose }: { onClose: () => void }) {
+  const { lang, t: tr } = useT();
   const [deviceId, setDeviceId] = useState<string | null>(null);
   const [profile, setProfile] = useState<Profile | undefined>(undefined);
   const [name, setName] = useState<string>("");
@@ -127,10 +115,11 @@ export function ProfileOverlay({ onClose }: { onClose: () => void }) {
   }, [deviceId]);
 
   // Open = mount. Fire the load once deviceId is ready so the user sees fresh
-  // numbers every time the overlay surfaces.
+  // numbers every time the overlay surfaces. Also refetch when the language
+  // changes so achievement labels arrive in the new language.
   useEffect(() => {
     if (deviceId) load();
-  }, [deviceId, load]);
+  }, [deviceId, load, lang]);
 
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -161,7 +150,7 @@ export function ProfileOverlay({ onClose }: { onClose: () => void }) {
           hitSlop={12}
           onPress={onClose}
           accessibilityRole="button"
-          accessibilityLabel="Fechar"
+          accessibilityLabel={tr("a11y.close")}
         >
           <View style={styles.closeBtn}>
             <X size={24} color={palette.neutral[700]} weight="regular" />
@@ -172,7 +161,7 @@ export function ProfileOverlay({ onClose }: { onClose: () => void }) {
       {error && !profile ? (
         <View style={styles.center}>
           <Text style={styles.errorText}>{error}</Text>
-          <DuoButton title="TENTAR DE NOVO" onPress={load} fullWidth={false} />
+          <DuoButton title={tr("common.retry_caps")} onPress={load} fullWidth={false} />
         </View>
       ) : loading ? (
         <Animated.View entering={FadeIn.duration(220)} style={styles.center}>
@@ -206,7 +195,7 @@ export function ProfileOverlay({ onClose }: { onClose: () => void }) {
                 numberOfLines={1}
                 adjustsFontSizeToFit
               >
-                <Text style={styles.greetHello}>Olá, </Text>
+                <Text style={styles.greetHello}>{tr("profile.greeting_hello")}</Text>
                 <Text style={styles.greetName}>{name}</Text>
               </Text>
               <PencilSimple size={18} color={palette.neutral[400]} weight="bold" />
@@ -214,22 +203,31 @@ export function ProfileOverlay({ onClose }: { onClose: () => void }) {
           </Animated.View>
 
           <Animated.View entering={FadeInDown.duration(240).delay(40)}>
-            <Text style={styles.sectionTitle}>Dias consecutivos</Text>
+            <Text style={styles.sectionTitle}>{tr("profile.section_streak")}</Text>
             <StreakInline
               current={profile.streak_current}
               best={profile.streak_best}
             />
           </Animated.View>
 
-          <Animated.View entering={FadeInDown.duration(240).delay(100)}>
+          <Animated.View entering={FadeInDown.duration(240).delay(80)}>
+            <Text style={styles.sectionTitle}>
+              {tr("profile.section_language")}
+            </Text>
+            <LanguageToggle />
+          </Animated.View>
+
+          <Animated.View entering={FadeInDown.duration(240).delay(120)}>
             <View style={styles.sectionHeaderRow}>
-              <Text style={styles.sectionTitleInline}>Últimos 7 dias</Text>
+              <Text style={styles.sectionTitleInline}>
+                {tr("profile.section_last_7_days")}
+              </Text>
               <Pressable
                 onPress={() => setHeatmapOpen(true)}
                 hitSlop={8}
                 style={styles.linkBtn}
               >
-                <Text style={styles.linkText}>Ver tudo</Text>
+                <Text style={styles.linkText}>{tr("profile.link_see_all")}</Text>
                 <CaretRight size={14} color={palette.primary[600]} weight="bold" />
               </Pressable>
             </View>
@@ -240,13 +238,13 @@ export function ProfileOverlay({ onClose }: { onClose: () => void }) {
           </Animated.View>
 
           <Animated.View entering={FadeInDown.duration(240).delay(160)}>
-            <Text style={styles.sectionTitle}>Estatísticas</Text>
+            <Text style={styles.sectionTitle}>{tr("profile.section_stats")}</Text>
             <StatsFlat profile={profile} />
           </Animated.View>
 
           {profile.wpm_trend.length > 1 ? (
             <Animated.View entering={FadeInDown.duration(240).delay(220)}>
-              <Text style={styles.sectionTitle}>Ritmo de fala (WPM)</Text>
+              <Text style={styles.sectionTitle}>{tr("profile.section_wpm_trend")}</Text>
               <BarChart
                 points={profile.wpm_trend.map((p) => ({ date: p.date, value: p.wpm }))}
               />
@@ -254,7 +252,7 @@ export function ProfileOverlay({ onClose }: { onClose: () => void }) {
           ) : null}
 
           <Animated.View entering={FadeInDown.duration(240).delay(280)}>
-            <Text style={styles.sectionTitle}>Conquistas</Text>
+            <Text style={styles.sectionTitle}>{tr("profile.section_achievements")}</Text>
             <Achievements list={profile.achievements} />
           </Animated.View>
         </ScrollView>
@@ -279,6 +277,48 @@ export function ProfileOverlay({ onClose }: { onClose: () => void }) {
   );
 }
 
+// PT / EN segmented pill. Tapping a segment writes to AsyncStorage via the
+// locale store, which notifies every subscriber (including the useT() inside
+// this component) so the whole app re-renders instantly.
+function LanguageToggle() {
+  const { lang } = useT();
+  const options: { value: Language; label: string }[] = [
+    { value: "pt", label: "Português" },
+    { value: "en", label: "English" },
+  ];
+  return (
+    <View style={styles.langSegment}>
+      {options.map((opt) => {
+        const selected = opt.value === lang;
+        return (
+          <Pressable
+            key={opt.value}
+            onPress={() => {
+              if (selected) return;
+              Haptics.selectionAsync().catch(() => {});
+              void setLanguage(opt.value);
+            }}
+            style={({ pressed }) => [
+              styles.langSegmentItem,
+              selected && styles.langSegmentItemSelected,
+              pressed && !selected && styles.langSegmentItemPressed,
+            ]}
+          >
+            <Text
+              style={[
+                styles.langSegmentText,
+                selected && styles.langSegmentTextSelected,
+              ]}
+            >
+              {opt.label}
+            </Text>
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+}
+
 function StreakInline({
   current,
   best,
@@ -286,6 +326,7 @@ function StreakInline({
   current: number;
   best: number;
 }) {
+  const { t: tr } = useT();
   const lit = current > 0;
   const flameColor = lit ? palette.primary[600] : palette.neutral[400];
   const numberColor = lit ? palette.primary[700] : palette.neutral[600];
@@ -327,8 +368,6 @@ function StreakInline({
     opacity: 0.85 + breath.value * 0.15,
   }));
 
-  // The streak number gets the same heartbeat so the whole hero feels alive.
-  // The bump adds a discrete lift + grow when `current` increments.
   const numberStyle = useAnimatedStyle(() => ({
     transform: [
       { translateY: -4 * bump.value },
@@ -349,7 +388,9 @@ function StreakInline({
         </Animated.Text>
         <View style={styles.streakCardSpacer} />
         <View style={styles.streakCardRecord}>
-          <Text style={styles.streakCardRecordLabel}>Recorde</Text>
+          <Text style={styles.streakCardRecordLabel}>
+            {tr("profile.streak_record_label")}
+          </Text>
           <Text style={styles.streakCardRecordValue}>{best}</Text>
         </View>
       </View>
@@ -364,6 +405,15 @@ function WeekStrip({
   days: ProfileActivityPoint[];
   onExpand: () => void;
 }) {
+  const { lang } = useT();
+  const names = shortWeekdays(lang);
+  function shortWeekday(iso: string): string {
+    const d = new Date(iso + "T00:00:00");
+    return names[d.getDay()];
+  }
+  function dayOfMonth(iso: string): string {
+    return String(parseInt(iso.slice(8, 10), 10));
+  }
   return (
     <Pressable onPress={onExpand} style={styles.weekStripRow}>
       {days.map((d) => (
@@ -402,28 +452,29 @@ type StatTile = {
 };
 
 function StatsFlat({ profile }: { profile: Profile }) {
+  const { t: tr } = useT();
   const tiles: StatTile[] = [
     {
       icon: Microphone,
-      label: "Sessões",
+      label: tr("profile.stat_sessions"),
       target: profile.total_sessions,
       decimals: 0,
     },
     {
       icon: Clock,
-      label: "Minutos",
+      label: tr("profile.stat_minutes"),
       target: profile.total_minutes,
       decimals: 1,
     },
     {
       icon: Gauge,
-      label: "WPM médio",
+      label: tr("profile.stat_avg_wpm"),
       target: profile.avg_wpm,
       decimals: 0,
     },
     {
       icon: Trophy,
-      label: "Melhor nota",
+      label: tr("profile.stat_best_rating"),
       target: profile.best_rating,
       decimals: 0,
       suffix: "/10",
@@ -455,8 +506,7 @@ function StatsFlat({ profile }: { profile: Profile }) {
         <View style={styles.fillerInline}>
           <WarningCircle size={16} color={palette.neutral[500]} weight="bold" />
           <Text style={styles.fillerInlineText}>
-            Filler word mais comum:{" "}
-            <Text style={styles.fillerStrong}>"{profile.top_filler}"</Text>
+            {tr("profile.filler_inline", { word: profile.top_filler })}
           </Text>
         </View>
       ) : null}
@@ -464,9 +514,6 @@ function StatsFlat({ profile }: { profile: Profile }) {
   );
 }
 
-// Counts up from 0 → target over ~900ms with ease-out. Null / undefined / zero
-// targets render the dash placeholder immediately and never tick. The counter
-// only runs once per mount of a given target so re-renders don't re-trigger it.
 function CountUpText({
   target,
   decimals,
@@ -484,7 +531,6 @@ function CountUpText({
   const final = empty ? 0 : target;
   const [display, setDisplay] = useState<string>(empty ? "-" : "0");
 
-  // Ref guarantees we count up exactly once per mount even under StrictMode.
   const ranRef = useRef(false);
 
   useEffect(() => {
@@ -496,7 +542,6 @@ function CountUpText({
     let frame: ReturnType<typeof setTimeout> | null = null;
     const tick = () => {
       const t = Math.min(1, (Date.now() - start) / duration);
-      // ease-out cubic
       const eased = 1 - Math.pow(1 - t, 3);
       const v = eased * final;
       setDisplay(v.toFixed(decimals));
@@ -522,6 +567,7 @@ function CountUpText({
 }
 
 function BarChart({ points }: { points: { date: string; value: number }[] }) {
+  const { lang, t: tr } = useT();
   if (points.length === 0) return null;
   const max = Math.max(...points.map((p) => p.value));
   const min = Math.min(...points.map((p) => p.value));
@@ -529,8 +575,8 @@ function BarChart({ points }: { points: { date: string; value: number }[] }) {
   return (
     <View>
       <View style={styles.chartHeader}>
-        <Text style={styles.chartLabel}>mín {min.toFixed(0)}</Text>
-        <Text style={styles.chartLabel}>máx {max.toFixed(0)}</Text>
+        <Text style={styles.chartLabel}>{tr("profile.chart_min")} {min.toFixed(0)}</Text>
+        <Text style={styles.chartLabel}>{tr("profile.chart_max")} {max.toFixed(0)}</Text>
       </View>
       <View style={styles.chartRow}>
         {points.map((p, i) => {
@@ -542,7 +588,7 @@ function BarChart({ points }: { points: { date: string; value: number }[] }) {
                 <ChartBarFill heightPct={heightPct} delay={i * 30} />
               </View>
               <Text style={styles.chartBarLabel} numberOfLines={1}>
-                {formatShortDate(p.date)}
+                {fmtShortDate(p.date, lang)}
               </Text>
             </View>
           );
@@ -552,8 +598,6 @@ function BarChart({ points }: { points: { date: string; value: number }[] }) {
   );
 }
 
-// One bar — grows from 0% to its target height on mount with a slight stagger
-// driven by `delay`. Cubic ease-out so the tops settle softly.
 function ChartBarFill({ heightPct, delay }: { heightPct: number; delay: number }) {
   const progress = useSharedValue(0);
   useEffect(() => {
@@ -564,7 +608,6 @@ function ChartBarFill({ heightPct, delay }: { heightPct: number; delay: number }
         easing: Easing.out(Easing.cubic),
       }),
     );
-    // intentionally one-shot
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const aStyle = useAnimatedStyle(() => ({
@@ -574,6 +617,7 @@ function ChartBarFill({ heightPct, delay }: { heightPct: number; delay: number }
 }
 
 function Achievements({ list }: { list: ProfileAchievement[] }) {
+  const { t: tr } = useT();
   const [open, setOpen] = useState(false);
   const sorted = useMemo(
     () => [...list].sort((a, b) => Number(b.earned) - Number(a.earned)),
@@ -603,11 +647,13 @@ function Achievements({ list }: { list: ProfileAchievement[] }) {
             <Text style={styles.achievementsSummaryCountTotal}> / {total}</Text>
           </Text>
           <Text style={styles.achievementsSummaryLabel}>
-            {earnedCount === 1 ? "conquista desbloqueada" : "conquistas desbloqueadas"}
+            {earnedCount === 1
+              ? tr("profile.achievements_summary_one")
+              : tr("profile.achievements_summary_many")}
           </Text>
         </View>
         <View style={styles.achievementsSummaryCta}>
-          <Text style={styles.linkText}>Ver mais</Text>
+          <Text style={styles.linkText}>{tr("profile.link_see_more")}</Text>
           <CaretRight size={14} color={palette.primary[600]} weight="bold" />
         </View>
       </Pressable>
@@ -636,6 +682,7 @@ function AchievementsModal({
   total: number;
   onClose: () => void;
 }) {
+  const { t: tr } = useT();
   return (
     <Modal
       visible={visible}
@@ -646,9 +693,12 @@ function AchievementsModal({
       <View style={styles.modalRoot}>
         <View style={styles.modalHeader}>
           <View style={{ flex: 1 }}>
-            <Text style={styles.modalTitle}>Conquistas</Text>
+            <Text style={styles.modalTitle}>{tr("profile.achievements_modal_title")}</Text>
             <Text style={styles.modalSubtitle}>
-              {earnedCount} de {total} desbloqueadas
+              {tr("profile.achievements_modal_subtitle", {
+                earned: earnedCount,
+                total,
+              })}
             </Text>
           </View>
           <Pressable onPress={onClose} hitSlop={12} style={styles.modalCloseBtn}>
@@ -680,8 +730,6 @@ function AchievementCard({
 }) {
   const earned = achievement.earned;
   const press = useSharedValue(0);
-  // Earned cards get a continuous, very soft glow loop so they read as "alive"
-  // next to the locked ones. Locked cards stay static.
   const glow = useSharedValue(0);
   useEffect(() => {
     if (!earned) return;
@@ -699,7 +747,6 @@ function AchievementCard({
     transform: [{ scale: 1 - press.value * 0.04 + (earned ? glow.value * 0.01 : 0) }],
   }));
 
-  // Earned trophies subtly pulse so the eye lands on them first.
   const trophyStyle = useAnimatedStyle(() => ({
     transform: [{ scale: 1 + glow.value * 0.08 }],
   }));
@@ -772,6 +819,8 @@ function HeatmapModal({
   days: ProfileActivityPoint[];
   onClose: () => void;
 }) {
+  const { lang, t: tr } = useT();
+  const monthNames = monthNamesFull(lang);
   const { months, totalActive } = useMemo(() => {
     if (days.length === 0) {
       return { months: [] as MonthBucket[], totalActive: 0 };
@@ -803,8 +852,6 @@ function HeatmapModal({
   const scrollRef = useRef<ScrollView>(null);
   const initRef = useRef(false);
 
-  // When the modal opens, jump to the most recent month (last bucket).
-  // The flag guards against re-jumping when the user navigates while open.
   useEffect(() => {
     if (!visible) {
       initRef.current = false;
@@ -840,9 +887,11 @@ function HeatmapModal({
       <View style={styles.modalRoot}>
         <View style={styles.modalHeader}>
           <View style={{ flex: 1 }}>
-            <Text style={styles.modalTitle}>Atividade · 12 meses</Text>
+            <Text style={styles.modalTitle}>{tr("profile.activity_modal_title")}</Text>
             <Text style={styles.modalSubtitle}>
-              {totalActive} {totalActive === 1 ? "dia ativo" : "dias ativos"} no total
+              {totalActive === 1
+                ? tr("profile.activity_modal_subtitle_one")
+                : tr("profile.activity_modal_subtitle_many", { count: totalActive })}
             </Text>
           </View>
           <Pressable onPress={onClose} hitSlop={12} style={styles.modalCloseBtn}>
@@ -865,7 +914,7 @@ function HeatmapModal({
           </Pressable>
           <View style={styles.monthNavCenter}>
             <Text style={styles.monthNavMonth}>
-              {current ? MONTH_NAMES_FULL_PT[current.month] : ""}
+              {current ? monthNames[current.month] : ""}
             </Text>
             <Text style={styles.monthNavYear}>{current?.year ?? ""}</Text>
           </View>
@@ -908,14 +957,14 @@ function HeatmapModal({
         </View>
 
         <View style={styles.modalLegend}>
-          <Text style={styles.heatmapLegendText}>menos</Text>
+          <Text style={styles.heatmapLegendText}>{tr("profile.heatmap_legend_less")}</Text>
           {[0, 1, 2, 3].map((n) => (
             <View
               key={n}
               style={[styles.heatmapLegendCell, { backgroundColor: heatmapColor(n) }]}
             />
           ))}
-          <Text style={styles.heatmapLegendText}>mais</Text>
+          <Text style={styles.heatmapLegendText}>{tr("profile.heatmap_legend_more")}</Text>
         </View>
       </View>
     </Modal>
@@ -923,6 +972,8 @@ function HeatmapModal({
 }
 
 function MonthCalendar({ month }: { month: MonthBucket }) {
+  const { lang, t: tr } = useT();
+  const weekdays = weekdayInitials(lang);
   const rows = useMemo(() => {
     const firstDate = new Date(month.year, month.month, 1);
     const jsDow = firstDate.getDay();
@@ -967,7 +1018,7 @@ function MonthCalendar({ month }: { month: MonthBucket }) {
   return (
     <View style={styles.calRoot}>
       <View style={styles.calWeekHeader}>
-        {WEEKDAY_NAMES_PT.map((w, i) => (
+        {weekdays.map((w, i) => (
           <Text key={i} style={styles.calWeekHeaderText}>
             {w}
           </Text>
@@ -1015,7 +1066,9 @@ function MonthCalendar({ month }: { month: MonthBucket }) {
       </View>
 
       <Text style={styles.calFootnote}>
-        {month.active} {month.active === 1 ? "dia ativo" : "dias ativos"} neste mês
+        {month.active === 1
+          ? tr("profile.activity_calendar_footnote_one")
+          : tr("profile.activity_calendar_footnote_many", { count: month.active })}
       </Text>
     </View>
   );
@@ -1034,6 +1087,7 @@ function NameEditModal({
   onSave: () => void;
   onCancel: () => void;
 }) {
+  const { t: tr } = useT();
   return (
     <Modal
       visible={visible}
@@ -1043,13 +1097,13 @@ function NameEditModal({
     >
       <Pressable style={styles.nameModalBackdrop} onPress={onCancel}>
         <Pressable style={styles.nameModalCard} onPress={() => { /* swallow */ }}>
-          <Text style={styles.nameModalTitle}>Como te chamas?</Text>
+          <Text style={styles.nameModalTitle}>{tr("profile.name_modal_title")}</Text>
           <TextInput
             value={value}
             onChangeText={onChangeValue}
             autoFocus
             maxLength={32}
-            placeholder="O teu nome"
+            placeholder={tr("profile.name_modal_placeholder")}
             placeholderTextColor={palette.neutral[400]}
             style={styles.nameModalInput}
             returnKeyType="done"
@@ -1057,9 +1111,9 @@ function NameEditModal({
           />
           <View style={styles.nameModalActions}>
             <Pressable onPress={onCancel} hitSlop={8} style={styles.nameModalCancel}>
-              <Text style={styles.nameModalCancelText}>Cancelar</Text>
+              <Text style={styles.nameModalCancelText}>{tr("common.cancel")}</Text>
             </Pressable>
-            <DuoButton title="GUARDAR" onPress={onSave} fullWidth={false} />
+            <DuoButton title={tr("common.save_caps")} onPress={onSave} fullWidth={false} />
           </View>
         </Pressable>
       </Pressable>
@@ -1195,6 +1249,39 @@ const styles = StyleSheet.create({
     fontVariant: ["tabular-nums"],
     marginTop: 2,
   },
+
+  // Language toggle (segmented pill)
+  langSegment: {
+    flexDirection: "row",
+    backgroundColor: palette.primary[50],
+    borderColor: palette.primary[200],
+    borderWidth: 1,
+    borderRadius: radii.pill,
+    padding: 4,
+    gap: 4,
+  },
+  langSegmentItem: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 10,
+    borderRadius: radii.pill,
+  },
+  langSegmentItemPressed: {
+    backgroundColor: palette.primary[100],
+  },
+  langSegmentItemSelected: {
+    backgroundColor: palette.primary[600],
+  },
+  langSegmentText: {
+    fontFamily: fonts.extrabold,
+    fontSize: 14,
+    color: palette.primary[700],
+  },
+  langSegmentTextSelected: {
+    color: palette.white,
+  },
+
   weekStripRow: {
     flexDirection: "row",
     gap: spacing.sm,

@@ -30,6 +30,7 @@ import { Platform, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { PressableScale } from "@/components/ui/PressableScale";
+import { useT } from "@/lib/i18n";
 import { openReveal, type RevealKind } from "@/lib/revealOverlay";
 import { colors, fonts, palette, spacing } from "@/lib/theme";
 
@@ -45,12 +46,13 @@ const SIDE_ICON_SIZE = 30;
 export function BottomNav({ active = "plans" }: BottomNavProps) {
   const insets = useSafeAreaInsets();
   const router = useRouter();
+  const { t } = useT();
 
   return (
     <View style={[styles.wrapper, { paddingBottom: insets.bottom }]}>
       <View style={styles.bar}>
         <SideButton
-          label="Planos"
+          label={t("bottom_nav.plans")}
           Icon={ListChecks}
           active={active === "plans"}
           onPress={() => {
@@ -61,14 +63,18 @@ export function BottomNav({ active = "plans" }: BottomNavProps) {
 
         <View style={styles.centerColumn}>
           <View style={styles.centerSpacer} />
-          <Text style={styles.askLabel}>Perguntar</Text>
+          <Text style={styles.askLabel}>{t("bottom_nav.ask")}</Text>
         </View>
 
-        <RevealSideButton kind="profile" label="Perfil" Icon={UserCircle} />
+        <RevealSideButton
+          kind="profile"
+          label={t("bottom_nav.profile")}
+          Icon={UserCircle}
+        />
       </View>
 
       <View style={styles.floatRow} pointerEvents="box-none">
-        <AskButton />
+        <AskButton label={t("bottom_nav.ask")} />
       </View>
     </View>
   );
@@ -146,7 +152,7 @@ function RevealSideButton({
   );
 }
 
-function AskButton() {
+function AskButton({ label }: { label: string }) {
   const anchorRef = useRef<View>(null);
   const handlePress = () => {
     Haptics.selectionAsync().catch(() => {});
@@ -162,7 +168,7 @@ function AskButton() {
       hitSlop={12}
       scale={0.94}
       accessibilityRole="button"
-      accessibilityLabel="Perguntar"
+      accessibilityLabel={label}
     >
       <View ref={anchorRef} collapsable={false} style={styles.askButton}>
         <Chats size={36} color={palette.white} weight="fill" />

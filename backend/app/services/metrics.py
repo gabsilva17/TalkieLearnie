@@ -1,6 +1,9 @@
 import statistics
+from typing import Literal
 
-from .fillers_pt import count_fillers, count_fillers_from_words
+from .fillers import count_fillers, count_fillers_from_words
+
+Language = Literal["pt", "en"]
 
 WINDOW_S = 10.0
 STEP_S = 2.0
@@ -33,15 +36,22 @@ def compute_pacing_variation(words: list[dict], duration_s: float) -> float:
     return round(statistics.pstdev(rates) / mean, 3)
 
 
-def compute_metrics(transcript: str, words: list[dict], duration_s: float) -> dict:
+def compute_metrics(
+    transcript: str,
+    words: list[dict],
+    duration_s: float,
+    lang: Language = "pt",
+) -> dict:
     word_count = len(words) if words else len(transcript.split())
     wpm = compute_wpm(word_count, duration_s)
     if words:
         filler_count, top_filler, filler_breakdown, filler_timestamps = (
-            count_fillers_from_words(words)
+            count_fillers_from_words(words, lang=lang)
         )
     else:
-        filler_count, top_filler, filler_breakdown = count_fillers(transcript)
+        filler_count, top_filler, filler_breakdown = count_fillers(
+            transcript, lang=lang
+        )
         filler_timestamps = []
     pacing = compute_pacing_variation(words, duration_s)
     return {

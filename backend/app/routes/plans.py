@@ -21,6 +21,19 @@ _EXTRAS_NAME_RE = re.compile(r"^[A-Za-z0-9_\-]+\.pdf$")
 MAX_PDF_BYTES = 32 * 1024 * 1024
 
 FocusMode = Literal["communication", "technical", "both"]
+Language = Literal["pt", "en"]
+
+# Localised user-visible error messages for the plan create endpoint. We
+# inline a tiny dict per language instead of pulling in the mobile i18n
+# layer — these are the only two strings that ship from this route.
+_ERR_PDF_TOO_BIG = {
+    "pt": "PDF maior do que {limit} MB",
+    "en": "PDF larger than {limit} MB",
+}
+_ERR_PDF_TYPE = {
+    "pt": "o ficheiro tem de ser PDF",
+    "en": "the file must be a PDF",
+}
 
 
 def _extras_url(request: Request | None, filename: str | None) -> str | None:
@@ -56,6 +69,7 @@ def _plan_row_to_out(
         extra_text=plan_row.get("extra_text"),
         extra_pdf_url=_extras_url(request, plan_row.get("extra_pdf_filename")),
         focus_mode=plan_row.get("focus_mode"),
+        language=(plan_row.get("language") or "pt"),
         created_at=plan_row["created_at"],
         days=days,
     )
@@ -70,6 +84,7 @@ def create_plan(
     audience_info: str = Form(min_length=1),
     extra_text: str | None = Form(default=None),
     focus_mode: str | None = Form(default=None),
+    language: str = Form(default="pt"),
     pdf: UploadFile | None = File(default=None),
 ) -> PlanOut:
     # Normalize blank-string form values (the mobile client just sends "" when
@@ -78,6 +93,10 @@ def create_plan(
     focus_mode = (focus_mode or "").strip() or None
     if focus_mode is not None and focus_mode not in ("communication", "technical", "both"):
         raise HTTPException(status_code=400, detail="invalid focus_mode")
+
+    # Coerce to the supported set; default everything unfamiliar back to pt
+    # so legacy / unknown clients still work.
+    plan_lang: Language = "en" if language == "en" else "pt"
 
     pdf_bytes: bytes | None = None
     pdf_original_name: str | None = None
@@ -92,11 +111,15 @@ def create_plan(
             if len(pdf_bytes) > MAX_PDF_BYTES:
                 raise HTTPException(
                     status_code=413,
-                    detail=f"PDF maior do que {MAX_PDF_BYTES // (1024 * 1024)} MB",
+                    detail=_ERR_PDF_TOO_BIG[plan_lang].format(
+                        limit=MAX_PDF_BYTES // (1024 * 1024)
+                    ),
                 )
             ctype = (pdf.content_type or "").lower()
             if ctype and ctype != "application/pdf":
-                raise HTTPException(status_code=400, detail="o ficheiro tem de ser PDF")
+                raise HTTPException(
+                    status_code=400, detail=_ERR_PDF_TYPE[plan_lang]
+                )
             pdf_original_name = pdf.filename
 
     try:
@@ -107,6 +130,7 @@ def create_plan(
             extra_text=extra_text,
             pdf_bytes=pdf_bytes,
             focus_mode=focus_mode,  # type: ignore[arg-type]
+            lang=plan_lang,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -140,6 +164,7 @@ def create_plan(
                 "extra_text": extra_text,
                 "extra_pdf_filename": pdf_filename,
                 "focus_mode": focus_mode,
+                "language": plan_lang,
             }
         )
         .execute()

@@ -11,6 +11,7 @@ import Animated, {
   withTiming,
 } from "react-native-reanimated";
 
+import { useT } from "@/lib/i18n";
 import { palette, radii, spacing, type as t } from "@/lib/theme";
 
 export type DayCardSkeletonPhase = "idle" | "generating";
@@ -72,6 +73,7 @@ function ShimmerBar({ width }: { width: number | string }) {
 }
 
 export function DayCardSkeleton({ index, phase }: DayCardSkeletonProps) {
+  const { t: tr } = useT();
   const isIdle = phase === "idle";
   const wrap = useSharedValue(isIdle ? 0 : 1);
   useEffect(() => {
@@ -96,7 +98,7 @@ export function DayCardSkeleton({ index, phase }: DayCardSkeletonProps) {
       <View style={styles.content}>
         <Text
           style={[styles.eyebrow, isIdle ? styles.eyebrowIdle : null]}
-        >{`Dia ${index}`}</Text>
+        >{tr("common.day_label", { index })}</Text>
         {isIdle ? (
           <View style={styles.idleRow}>
             <View style={[styles.idleBar, { width: 160 }]} />

@@ -31,6 +31,7 @@ import Animated, {
 } from "react-native-reanimated";
 
 import { DuoButton } from "@/components/ui/DuoButton";
+import { useT } from "@/lib/i18n";
 import {
   dismissStreakUnlock,
   peekStreakUnlock,
@@ -52,19 +53,9 @@ const FIRE = {
   textMuted: "#94A3B8",   // body text on dark bg
 } as const;
 
-const PT_MOTIVATIONS = [
-  "Mais um dia em chamas. Continua.",
-  "Aceitaste o desafio de hoje. Bom trabalho.",
-  "O hábito está a pegar. Não pares agora.",
-  "Cada dia conta. E este, ficou no bolso.",
-  "Treino consistente, resultados garantidos.",
-  "Dia somado. Estás a construir algo.",
-  "Mantém a chama acesa. Amanhã também.",
-];
-
-function pickMotivation(seed: number): string {
-  const idx = Math.abs(seed) % PT_MOTIVATIONS.length;
-  return PT_MOTIVATIONS[idx];
+function pickFromList(list: readonly string[], seed: number): string {
+  if (list.length === 0) return "";
+  return list[Math.abs(seed) % list.length];
 }
 
 export function StreakUnlockedOverlay() {
@@ -84,6 +75,7 @@ export function StreakUnlockedOverlay() {
 }
 
 function CelebrationScreen({ event }: { event: StreakUnlockedEvent }) {
+  const { t: tr, list } = useT();
   const bg = useSharedValue(0);
   const contentOpacity = useSharedValue(0);
   const contentY = useSharedValue(28);
@@ -230,12 +222,15 @@ function CelebrationScreen({ event }: { event: StreakUnlockedEvent }) {
     transform: [{ scale: 0.4 + spark3.value * 0.8 }],
   }));
 
+  const motivations = list("motivations.streak");
   const motivation = useMemo(
-    () => pickMotivation(event.streak_current * 7 + event.streak_best),
-    [event.streak_current, event.streak_best],
+    () => pickFromList(motivations, event.streak_current * 7 + event.streak_best),
+    [motivations, event.streak_current, event.streak_best],
   );
 
-  const dayWord = event.streak_current === 1 ? "dia" : "dias";
+  const dayWord = event.streak_current === 1
+    ? tr("streak_overlay.unit_one")
+    : tr("streak_overlay.unit_many");
 
   return (
     <View pointerEvents="auto" style={StyleSheet.absoluteFill}>
@@ -272,23 +267,23 @@ function CelebrationScreen({ event }: { event: StreakUnlockedEvent }) {
         </View>
 
         <Animated.View style={[styles.copy, contentStyle]} pointerEvents="box-none">
-          <Text style={styles.eyebrow}>Streak ativado</Text>
-          <Text style={styles.headline}>Estás em chamas!</Text>
+          <Text style={styles.eyebrow}>{tr("streak_overlay.eyebrow")}</Text>
+          <Text style={styles.headline}>{tr("streak_overlay.headline")}</Text>
 
           <View style={styles.countWrap}>
             <Text style={styles.countValue}>{event.streak_current}</Text>
-            <Text style={styles.countUnit}>{dayWord} seguidos</Text>
+            <Text style={styles.countUnit}>{dayWord}</Text>
           </View>
 
           {event.is_new_best ? (
-            <Text style={styles.newBest}>Novo recorde pessoal</Text>
+            <Text style={styles.newBest}>{tr("streak_overlay.new_best")}</Text>
           ) : null}
 
           <Text style={styles.motivation}>{motivation}</Text>
 
           <View style={styles.buttonWrap}>
             <DuoButton
-              title="CONTINUAR"
+              title={tr("common.continue_caps")}
               variant="primary"
               onPress={() => {
                 if (!enteringDone) return;

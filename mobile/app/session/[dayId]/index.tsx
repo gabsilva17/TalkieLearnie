@@ -56,6 +56,7 @@ import { Screen } from "@/components/ui/Screen";
 import { Plan, PlanDay, SessionResult, api } from "@/lib/api";
 import { localTodayISO } from "@/lib/dayDate";
 import { getDeviceId } from "@/lib/deviceId";
+import { useT } from "@/lib/i18n";
 import {
   colors,
   fonts,
@@ -99,6 +100,7 @@ function formatMmSs(totalSeconds: number): string {
 
 export default function SessionRecord() {
   const router = useRouter();
+  const { t: tr } = useT();
   const goBackOrHome = () => {
     if (router.canGoBack()) router.back();
     else router.replace("/plans");
@@ -186,7 +188,7 @@ export default function SessionRecord() {
         }
         const match = findInPlans(plans);
         if (!match) {
-          setError("Sessão não encontrada.");
+          setError(tr("session.not_found"));
           setLoading(false);
           return;
         }
@@ -237,7 +239,10 @@ export default function SessionRecord() {
 
   async function startRecording() {
     if (!hasPermission) {
-      Alert.alert("Microfone", "Precisamos de permissão de microfone para gravar.");
+      Alert.alert(
+        tr("session.mic_permission_title"),
+        tr("session.mic_permission_body"),
+      );
       return;
     }
     try {
@@ -273,7 +278,7 @@ export default function SessionRecord() {
     }
     const uri = recorder.uri;
     if (!uri) {
-      setError("Gravação não foi guardada. Tenta de novo.");
+      setError(tr("session.save_failed"));
       return;
     }
 
@@ -284,9 +289,7 @@ export default function SessionRecord() {
     // to be rejected. Backend 422 stays as a safety net for the rare edge
     // case where elapsed >= 5 but Whisper returns an empty transcript.
     if (elapsed < 5) {
-      setTooShort(
-        "A tua gravação foi demasiado curta. Precisamos de pelo menos 5 segundos para te darmos um feedback útil. Responde com um pouco mais de detalhe e tenta de novo.",
-      );
+      setTooShort(tr("session.too_short_local"));
       return;
     }
 
@@ -299,15 +302,20 @@ export default function SessionRecord() {
     // motivation text has arrived (or a fallback) when it gets there.
     if (plan) {
       const planId = plan.id;
+      const planLang = plan.language;
       void (async () => {
         try {
           const id = await getDeviceId();
-          const msg = await api.getMotivation({ device_id: id, plan_id: planId });
+          const msg = await api.getMotivation({
+            device_id: id,
+            plan_id: planId,
+            lang: planLang,
+          });
           if (cancelledRef.current) return;
           setPendingMotivation(msg);
         } catch {
           if (cancelledRef.current) return;
-          setPendingMotivation("Estás um passo mais perto. Mais um treino feito.");
+          setPendingMotivation(tr("session.motivation_fetch_fallback"));
         }
       })();
     }
@@ -353,9 +361,9 @@ export default function SessionRecord() {
     return (
       <SafeAreaView style={styles.safe}>
         <View style={styles.center}>
-          <Text style={styles.errorText}>{error ?? "Sessão indisponível"}</Text>
+          <Text style={styles.errorText}>{error ?? tr("session.unavailable")}</Text>
           <DuoButton
-            title="VOLTAR"
+            title={tr("common.back_caps")}
             variant="secondary"
             onPress={() => goBackOrHome()}
             fullWidth={false}
@@ -723,6 +731,7 @@ function CelebrationFlow({
 // --- Phase 1: "Boa!" ---------------------------------------------------------
 
 function BoaPhase() {
+  const { t: tr } = useT();
   const scale = useSharedValue(0.4);
   const opacity = useSharedValue(0);
 
@@ -743,12 +752,14 @@ function BoaPhase() {
   return (
     <View style={celebrationStyles.phaseRoot}>
       <Confetti color={palette.primary[500]} />
-      <Animated.Text style={[celebrationStyles.boa, aStyle]}>Boa!</Animated.Text>
+      <Animated.Text style={[celebrationStyles.boa, aStyle]}>
+        {tr("session.boa_title")}
+      </Animated.Text>
       <Animated.Text
         entering={FadeInDown.duration(540).delay(500)}
         style={celebrationStyles.boaSubtitle}
       >
-        Gravaste mais um treino.
+        {tr("session.boa_subtitle")}
       </Animated.Text>
     </View>
   );
@@ -841,19 +852,20 @@ function ConfettiDot({ index, color }: { index: number; color: string }) {
 // --- Phase 2: day rail with current → done animation -------------------------
 
 function RailPhase({ plan, dayId }: { plan: Plan; dayId: string }) {
+  const { t: tr } = useT();
   return (
     <View style={celebrationStyles.railRoot}>
       <Animated.Text
         entering={FadeInDown.duration(420).delay(80)}
         style={celebrationStyles.railEyebrow}
       >
-        Plano
+        {tr("session.rail_eyebrow")}
       </Animated.Text>
       <Animated.Text
         entering={FadeInDown.duration(480).delay(160)}
         style={celebrationStyles.railTitle}
       >
-        Mais um dia feito.
+        {tr("session.rail_title")}
       </Animated.Text>
       <View style={celebrationStyles.railList}>
         {plan.days.map((d, i) => {
@@ -896,6 +908,7 @@ function RailRow({
   status: DayCardStatus;
   animateToDone: boolean;
 }) {
+  const { t: tr } = useT();
   const isDone = status === "done";
   const isCurrent = status === "current";
   const isLocked = status === "locked";
@@ -984,7 +997,7 @@ function RailRow({
               isCurrent || animateToDone ? railStyles.eyebrowCurrent : null,
               isLocked ? railStyles.eyebrowLocked : null,
             ]}
-          >{`Dia ${index}`}</Text>
+          >{tr("session.rail_day", { index })}</Text>
           <Text
             style={[railStyles.title, isLocked ? railStyles.titleLocked : null]}
             numberOfLines={1}
@@ -1000,6 +1013,7 @@ function RailRow({
 // --- Phase 3: motivational message -----------------------------------------
 
 function MotivationPhase({ message }: { message: string | null }) {
+  const { t: tr } = useT();
   // Breathing pulse: very subtle scale loop. Communicates "alive" without
   // resorting to a spinner if the upload is still in flight.
   const pulse = useSharedValue(1);
@@ -1025,7 +1039,7 @@ function MotivationPhase({ message }: { message: string | null }) {
   // Wait for the model's response before showing the full sentence — if it's
   // not in yet, the fallback is already short and complete, so we still show
   // SOMETHING rather than blank space.
-  const text = message ?? "Estás um passo mais perto.";
+  const text = message ?? tr("session.motivation_fallback");
 
   return (
     <View style={celebrationStyles.motivationRoot}>
@@ -1033,7 +1047,7 @@ function MotivationPhase({ message }: { message: string | null }) {
         entering={FadeInDown.duration(540).delay(120)}
         style={celebrationStyles.motivationEyebrow}
       >
-        Para ti
+        {tr("session.motivation_eyebrow")}
       </Animated.Text>
       <Animated.Text
         entering={FadeInDown.duration(720).delay(280)}
@@ -1060,6 +1074,7 @@ function TranscriptPhase({
   onContinue: (wasEdited: boolean, editedTranscript: string) => void;
   onRetry: () => void;
 }) {
+  const { t: tr } = useT();
   // The transcript card is now an editable surface. When the user touches up
   // a Whisper mistake we route them through the thank-you phase before the
   // result while the backend re-runs Sonnet against the corrected text.
@@ -1078,11 +1093,9 @@ function TranscriptPhase({
           entering={FadeIn.duration(620)}
           style={transcriptStyles.headerBlock}
         >
-          <Text style={transcriptStyles.eyebrow}>A tua resposta</Text>
-          <Text style={transcriptStyles.title}>Pronto para o feedback?</Text>
-          <Text style={transcriptStyles.hint}>
-            Algo ficou mal transcrito? Toca no texto para corrigir.
-          </Text>
+          <Text style={transcriptStyles.eyebrow}>{tr("session.transcript_eyebrow")}</Text>
+          <Text style={transcriptStyles.title}>{tr("session.transcript_title")}</Text>
+          <Text style={transcriptStyles.hint}>{tr("session.transcript_hint")}</Text>
         </Animated.View>
 
         <Animated.View
@@ -1090,7 +1103,7 @@ function TranscriptPhase({
           style={transcriptStyles.cardBlock}
         >
           <Card style={transcriptStyles.card}>
-            <Text style={transcriptStyles.caption}>Transcrição</Text>
+            <Text style={transcriptStyles.caption}>{tr("session.transcript_caption")}</Text>
             <TextInput
               style={transcriptStyles.input}
               value={text}
@@ -1100,7 +1113,7 @@ function TranscriptPhase({
               scrollEnabled
               selectionColor={palette.primary[500]}
               placeholder=""
-              accessibilityLabel="Transcrição editável"
+              accessibilityLabel={tr("session.transcript_a11y")}
             />
           </Card>
         </Animated.View>
@@ -1110,13 +1123,13 @@ function TranscriptPhase({
           style={transcriptStyles.actions}
         >
           <DuoButton
-            title="VER FEEDBACK"
+            title={tr("session.cta_see_feedback_caps")}
             iconRight={ArrowRight}
             variant="primary"
             onPress={() => onContinue(wasEdited, trimmed)}
           />
           <DuoButton
-            title="REPETIR"
+            title={tr("session.cta_repeat_caps")}
             iconRight={ArrowClockwise}
             variant="secondary"
             onPress={onRetry}
@@ -1133,6 +1146,7 @@ function TranscriptPhase({
 // the result screen on the user's behalf.
 
 function ThanksPhase() {
+  const { t: tr } = useT();
   const scale = useSharedValue(0.4);
   const opacity = useSharedValue(0);
   const pulse = useSharedValue(1);
@@ -1168,14 +1182,13 @@ function ThanksPhase() {
         entering={FadeInDown.duration(540).delay(180)}
         style={celebrationStyles.thanksTitle}
       >
-        Obrigado pela correção!
+        {tr("session.thanks_title")}
       </Animated.Text>
       <Animated.Text
         entering={FadeInDown.duration(540).delay(320)}
         style={celebrationStyles.thanksBody}
       >
-        Vamos usar as tuas alterações para treinar o modelo e evitar este erro
-        no futuro.
+        {tr("session.thanks_body")}
       </Animated.Text>
     </View>
   );
@@ -1187,6 +1200,7 @@ function ThanksPhase() {
 // waits for both the min dwell AND `reanalyzeReady` before advancing.
 
 function ReformulatingPhase() {
+  const { t: tr } = useT();
   const rotation = useSharedValue(0);
 
   useEffect(() => {
@@ -1211,13 +1225,13 @@ function ReformulatingPhase() {
         entering={FadeInDown.duration(540).delay(120)}
         style={celebrationStyles.reformulatingTitle}
       >
-        A reformular o feedback inicial
+        {tr("session.reformulating_title")}
       </Animated.Text>
       <Animated.Text
         entering={FadeInDown.duration(540).delay(260)}
         style={celebrationStyles.reformulatingBody}
       >
-        Estamos a aplicar as tuas correções à análise.
+        {tr("session.reformulating_body")}
       </Animated.Text>
     </View>
   );
@@ -1489,6 +1503,7 @@ function RecordStep({
   onAutoStart: () => void;
   onFinish: () => void;
 }) {
+  const { t: tr } = useT();
   const insets = useSafeAreaInsets();
 
   // Kick off recording exactly once when the step mounts — the countdown was
@@ -1515,7 +1530,7 @@ function RecordStep({
         <Pressable
           onPress={onClose}
           hitSlop={12}
-          accessibilityLabel="Fechar gravação"
+          accessibilityLabel={tr("session.record_close_a11y")}
         >
           <X size={28} color={palette.primary[100]} weight="bold" />
         </Pressable>
@@ -1526,7 +1541,7 @@ function RecordStep({
         style={recordStyles.center}
       >
         <Text style={recordStyles.caption}>
-          {isRecording ? "A gravar" : "A preparar…"}
+          {isRecording ? tr("session.record_recording") : tr("session.record_preparing")}
         </Text>
         <Text style={recordStyles.timer}>
           {formatMmSs(elapsed)}
@@ -1537,7 +1552,7 @@ function RecordStep({
 
         {hasPermission === false ? (
           <Text style={recordStyles.permWarn}>
-            Sem permissão de microfone. Activa nas Definições do telemóvel.
+            {tr("session.record_perm_warning")}
           </Text>
         ) : null}
       </Animated.View>
@@ -1550,7 +1565,7 @@ function RecordStep({
         ]}
       >
         <DuoButton
-          title="TERMINADO"
+          title={tr("session.cta_finished_caps")}
           iconRight={Check}
           variant="secondary"
           onPress={onFinish}
@@ -1660,9 +1675,10 @@ function TooShortStep({
   onRetry: () => void;
   onClose: () => void;
 }) {
+  const { t: tr } = useT();
   const footer = (
     <DuoButton
-      title="REPETIR"
+      title={tr("session.cta_repeat_caps")}
       iconRight={ArrowClockwise}
       variant="primary"
       onPress={onRetry}
@@ -1694,7 +1710,7 @@ function TooShortStep({
           entering={FadeInDown.duration(380).delay(140)}
           style={styles.tooShortTitle}
         >
-          Vamos repetir.
+          {tr("session.too_short_title")}
         </Animated.Text>
 
         <Animated.Text
@@ -1723,6 +1739,7 @@ function IntroStep({
   onClose: () => void;
   onContinue: () => void;
 }) {
+  const { t: tr } = useT();
   const isRetry = focusTip !== null;
   return (
     <Screen bg={palette.primary[500]}>
@@ -1739,7 +1756,11 @@ function IntroStep({
       >
         <Animated.View entering={FadeInDown.duration(360).delay(60)}>
           <Pill
-            label={isRetry ? "Nova tentativa" : `Dia ${day.day_index}`}
+            label={
+              isRetry
+                ? tr("session.intro_pill_retry")
+                : tr("session.intro_pill_day", { index: day.day_index })
+            }
             variant="info"
             icon={isRetry ? ArrowClockwise : Flame}
             iconWeight="fill"
@@ -1758,8 +1779,8 @@ function IntroStep({
           style={styles.introSubtitleOnBlue}
         >
           {isRetry
-            ? "Aplica o feedback que recebeste e tenta de novo."
-            : "Treino de hoje. Respira fundo, vamos lá."}
+            ? tr("session.intro_subtitle_retry")
+            : tr("session.intro_subtitle_today")}
         </Animated.Text>
 
         {focusTip ? (
@@ -1768,7 +1789,9 @@ function IntroStep({
             style={styles.focusTipWrap}
           >
             <Card style={styles.focusTipCardOnBlue}>
-              <Text style={styles.focusTipEyebrow}>Foco desta tentativa</Text>
+              <Text style={styles.focusTipEyebrow}>
+                {tr("session.focus_tip_eyebrow")}
+              </Text>
               <Text style={styles.focusTipText}>{focusTip}</Text>
             </Card>
           </Animated.View>
@@ -1779,7 +1802,7 @@ function IntroStep({
           style={styles.introCta}
         >
           <DuoButton
-            title="CONTINUAR"
+            title={tr("common.continue_caps")}
             iconRight={ArrowRight}
             variant="secondary"
             onPress={onContinue}
@@ -1803,9 +1826,10 @@ function QuestionStep({
   onBack: () => void;
   onReady: () => void;
 }) {
+  const { t: tr } = useT();
   const footer = (
     <DuoButton
-      title="PRONTO?"
+      title={tr("session.cta_ready_caps")}
       iconRight={ArrowRight}
       variant="primary"
       onPress={onReady}

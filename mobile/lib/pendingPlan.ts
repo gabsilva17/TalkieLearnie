@@ -1,4 +1,4 @@
-import { FocusMode, Plan, api } from "@/lib/api";
+import { FocusMode, Language, Plan, api } from "@/lib/api";
 
 // In-memory store that powers the optimistic /plan/pending screen. The
 // onboarding form calls `start(input)` to kick off the real `POST /plans`
@@ -20,6 +20,11 @@ export type PendingInput = {
   pdf_uri?: string | null;
   pdf_name?: string | null;
   focus_mode?: FocusMode | null;
+  // The language captured when the user submitted the onboarding form. The
+  // backend persists this on the plan row so every downstream LLM call
+  // (analyze, motivation, Whisper) uses it later, regardless of the device's
+  // current toggle.
+  language?: Language;
 };
 
 export type PendingState =
@@ -71,6 +76,7 @@ export function startPendingPlan(input: PendingInput): void {
       focus_mode: input.focus_mode,
       pdf_uri: input.pdf_uri,
       pdf_name: input.pdf_name,
+      language: input.language,
     })
     .then((plan) => {
       if (state.status !== "loading" || state.input !== input) {

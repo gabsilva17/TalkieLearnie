@@ -6,6 +6,12 @@ get a scorecard with feedback. Daily ritual, streaks, mascot.
 
 48-hour hackathon MVP. Theme: *digital essential*.
 
+## Demo
+
+Watch TalkieLearnie in action (1 min 45 sec).
+
+https://github.com/user-attachments/assets/9efb819c-1964-4de3-b39b-8e6a3effa304
+
 ## Layout
 
 ```
